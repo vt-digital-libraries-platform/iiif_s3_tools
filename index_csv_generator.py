@@ -1,6 +1,6 @@
 #!/usr/local/bin/python3
 
-# python3 index_csv_generator.py sources3folder, collectionname, targets3bucket
+# Usage: python3 index_csv_generator.py <source s3 bucket> <source directory> <target s3 bucket> <target directory>
 
 import boto3
 import os
@@ -8,15 +8,17 @@ import sys
 
 class IndexCSVGenerator(object):
 
-    def __init__(self, source, name, target_bucket):
-        self.source = source
-        self.name = name
-        self.target_bucket = target_bucket
+    def __init__(self, source_bucket_name, source_dir, target_bucket_name, target_dir):
+        self.source_bucket_name = source_bucket_name
+        self.source_dir = source_dir
+        self.target_bucket_name = target_bucket_name
+        self.target_dir = target_dir
         self.target_file_name = "index.csv"
 
         self.s3_client = boto3.client('s3')
         self.s3_resource = boto3.resource('s3')
-        self.bucket = self.s3_resource.Bucket(self.target_bucket)
+        self.source_bucket = self.s3_resource.Bucket(self.source_bucket_name)
+        self.target_bucket = self.s3_resource.Bucket(self.target_bucket_name)
 
     def run(self):
         objects = self.get_objects()
@@ -33,7 +35,7 @@ class IndexCSVGenerator(object):
         self.delete_local_temp(local_temp_file_name)
 
     def get_objects(self):
-        return [bucket_object.key for bucket_object in self.bucket.objects.filter(Prefix=self.source)]
+        return [bucket_object.key for bucket_object in self.source_bucket.objects.filter(Prefix=self.source_dir)]
 
     def get_csvs(self, objects):
         csvs = []
@@ -61,18 +63,19 @@ class IndexCSVGenerator(object):
         os.remove(file_name)
 
     def write_to_s3(self, local_file):
-        key = self.name + "." + self.target_file_name
-        self.s3_client.upload_file(local_file, self.target_bucket, key)
+        key = os.path.join(self.target_dir, self.target_file_name)
+        self.s3_client.upload_file(local_file, self.target_bucket_name, key)
 
 if __name__ == '__main__':
 
-    if len(sys.argv) < 4:
-        print("Usage: python3 index_csv_generator.py <source directory> <name> <target s3 bucket>")
+    if len(sys.argv) < 5:
+        print("Usage: python3 index_csv_generator.py <source s3 bucket> <source directory> <target s3 bucket> <target directory>")
         sys.exit(1)
     else:
-        source_dir = "".join(sys.argv[1])
-        name = "".join(sys.argv[2])
-        target_dir = "".join(sys.argv[3])
+        source_bucket = "".join(sys.argv[1])
+        source_dir = "".join(sys.argv[2])
+        target_bucket = "".join(sys.argv[3])
+        target_dir = "".join(sys.argv[4])
 
-    generator = IndexCSVGenerator(source_dir, name, target_dir)
+    generator = IndexCSVGenerator(source_bucket, source_dir, target_bucket, target_dir)
     generator.run()

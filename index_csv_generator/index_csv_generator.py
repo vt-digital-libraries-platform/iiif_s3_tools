@@ -39,8 +39,9 @@ class IndexCSVGenerator(object):
 
     def get_csvs(self, objects):
         csvs = []
+        index_csv = self.source_dir + "/index.csv"
         for obj in objects:
-          if obj.endswith(".csv"):
+          if obj.endswith(".csv") and obj != index_csv:
               csvs.append(obj)
         return csvs
 

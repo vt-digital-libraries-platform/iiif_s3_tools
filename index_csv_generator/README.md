@@ -3,9 +3,8 @@
 This Python script scans a source s3 bucket and creates an `index.csv` file which will contain a list of the csv files contained in the source bucket as well as the paths to all `manifest.json` files associated with each csv file.
 
 Usage -
-`python3 index_csv_generator.py <repository_type> <source s3 bucket> <source directory> <target s3 bucket> <target directory>`
+`python3 index_csv_generator.py <source s3 bucket> <source directory> <target s3 bucket> <target directory>`
 
-Note: `<repository_type>` would be one of "iawa" or "swva"
 
 The file created will be created as:
 `<target s3 bucket>/<target directory>/index.csv`

@@ -8,7 +8,8 @@ import sys
 
 class IndexCSVGenerator(object):
 
-    def __init__(self, source_bucket_name, source_dir, target_bucket_name, target_dir):
+    def __init__(self, repository_type, source_bucket_name, source_dir, target_bucket_name, target_dir):
+        self.repository_type = repository_type
         self.source_bucket_name = source_bucket_name
         self.source_dir = source_dir
         self.target_bucket_name = target_bucket_name
@@ -25,7 +26,7 @@ class IndexCSVGenerator(object):
         csvs = self.get_csvs(objects)
         output_string = ""
         for csv_file in csvs:
-            output_string += csv_file.strip("iawa/") + ","
+            output_string += csv_file.strip(self.repository_type + "/") + ","
             basepath = self.get_basepath(csv_file)
             manifest_string = self.get_manifest_string(basepath, objects)
             output_string += (manifest_string + "\n")
@@ -52,7 +53,7 @@ class IndexCSVGenerator(object):
         manifest_path_list = []
         for file in objects:
             if file.startswith(basepath) and file.endswith('manifest.json'):
-                manifest_path_list.append(self.get_basepath(file).strip("iawa/"))
+                manifest_path_list.append(self.get_basepath(file).strip(self.repository_type + "/"))
         return (',').join(manifest_path_list)
 
     def write_local_temp(self, output_string, file_name):
@@ -69,14 +70,15 @@ class IndexCSVGenerator(object):
 
 if __name__ == '__main__':
 
-    if len(sys.argv) < 5:
-        print("Usage: python3 index_csv_generator.py <source s3 bucket> <source directory> <target s3 bucket> <target directory>")
+    if len(sys.argv) < 6:
+        print("Usage: python3 index_csv_generator.py <repository_type> <source s3 bucket> <source directory> <target s3 bucket> <target directory>")
         sys.exit(1)
     else:
-        source_bucket = "".join(sys.argv[1])
-        source_dir = "".join(sys.argv[2])
-        target_bucket = "".join(sys.argv[3])
-        target_dir = "".join(sys.argv[4])
+        repository_type = "".join(sys.argv[1])
+        source_bucket = "".join(sys.argv[2])
+        source_dir = "".join(sys.argv[3])
+        target_bucket = "".join(sys.argv[4])
+        target_dir = "".join(sys.argv[5])
 
-    generator = IndexCSVGenerator(source_bucket, source_dir, target_bucket, target_dir)
+    generator = IndexCSVGenerator(repository_type, source_bucket, source_dir, target_bucket, target_dir)
     generator.run()

@@ -39,7 +39,7 @@ class IndexCSVGenerator(object):
     def get_repository_type(self, source_dir):
         pattern = re.compile('^[a-zA-Z]+')
         root = pattern.match(source_dir)
-        return source_dir.replace(root.group() + "/", "")
+        return root.group()
 
 
     def get_objects(self):

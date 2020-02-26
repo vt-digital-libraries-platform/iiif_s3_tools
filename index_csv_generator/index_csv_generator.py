@@ -27,7 +27,7 @@ class IndexCSVGenerator(object):
         csvs = self.get_csvs(objects)
         output_string = ""
         for csv_file in csvs:
-            output_string += csv_file.strip(self.repository_type + "/") + ","
+            output_string += csv_file.replace(self.repository_type + "/", "") + ","
             basepath = self.get_basepath(csv_file)
             manifest_string = self.get_manifest_string(basepath, objects)
             output_string += (manifest_string + "\n")
@@ -60,7 +60,7 @@ class IndexCSVGenerator(object):
         manifest_path_list = []
         for file in objects:
             if file.startswith(basepath) and file.endswith('manifest.json'):
-                manifest_path_list.append(self.get_basepath(file).strip(self.repository_type + "/"))
+                manifest_path_list.append(self.get_basepath(file).replace(self.repository_type + "/", ""))
         return (',').join(manifest_path_list)
 
     def write_local_temp(self, output_string, file_name):

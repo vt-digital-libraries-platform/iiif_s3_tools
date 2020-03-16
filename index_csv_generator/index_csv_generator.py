@@ -5,12 +5,14 @@
 import boto3
 import os
 import sys
+import re
 
 class IndexCSVGenerator(object):
 
     def __init__(self, source_bucket_name, source_dir, target_bucket_name, target_dir):
         self.source_bucket_name = source_bucket_name
         self.source_dir = source_dir
+        self.repository_type = self.get_repository_type(self.source_dir)
         self.target_bucket_name = target_bucket_name
         self.target_dir = target_dir
         self.target_file_name = "index.csv"
@@ -25,7 +27,7 @@ class IndexCSVGenerator(object):
         csvs = self.get_csvs(objects)
         output_string = ""
         for csv_file in csvs:
-            output_string += csv_file.strip("iawa/") + ","
+            output_string += csv_file.replace(self.repository_type + "/", "") + ","
             basepath = self.get_basepath(csv_file)
             manifest_string = self.get_manifest_string(basepath, objects)
             output_string += (manifest_string + "\n")
@@ -33,6 +35,12 @@ class IndexCSVGenerator(object):
         self.write_local_temp(output_string, local_temp_file_name)
         self.write_to_s3(local_temp_file_name)
         self.delete_local_temp(local_temp_file_name)
+
+    def get_repository_type(self, source_dir):
+        pattern = re.compile('^[a-zA-Z]+')
+        root = pattern.match(source_dir)
+        return root.group()
+
 
     def get_objects(self):
         return [bucket_object.key for bucket_object in self.source_bucket.objects.filter(Prefix=self.source_dir)]
@@ -52,7 +60,7 @@ class IndexCSVGenerator(object):
         manifest_path_list = []
         for file in objects:
             if file.startswith(basepath) and file.endswith('manifest.json'):
-                manifest_path_list.append(self.get_basepath(file).strip("iawa/"))
+                manifest_path_list.append(self.get_basepath(file).replace(self.repository_type + "/", ""))
         return (',').join(manifest_path_list)
 
     def write_local_temp(self, output_string, file_name):

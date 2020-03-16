@@ -5,6 +5,7 @@ This Python script scans a source s3 bucket and creates an `index.csv` file whic
 Usage -
 `python3 index_csv_generator.py <source s3 bucket> <source directory> <target s3 bucket> <target directory>`
 
+
 The file created will be created as:
 `<target s3 bucket>/<target directory>/index.csv`
 

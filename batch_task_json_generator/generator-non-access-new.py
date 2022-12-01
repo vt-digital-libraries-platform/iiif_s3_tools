@@ -140,7 +140,6 @@ for i in get_matching_s3_keys('vtlib-store', collectionPath, '.csv'):
         #position = j.find('/Access/')
         # If string contains Access and path already not in accessFolders
         if os.path.dirname(j) not in accessFolders:
-                print(j[0:-19])
                 print(os.path.dirname(j))
                 accessFolders.append(os.path.dirname(j))
                 with open(jsonStore + '/' + accessFolders[-1].replace('/', '-')[-42:-7] + '.json', 'w') as json_file:

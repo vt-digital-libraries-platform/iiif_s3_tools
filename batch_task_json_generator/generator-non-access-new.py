@@ -143,4 +143,4 @@ for i in get_matching_s3_keys('vtlib-store', collectionPath, '.csv'):
                 print(os.path.dirname(j))
                 accessFolders.append(os.path.dirname(j))
                 with open(jsonStore + '/' + accessFolders[-1].replace('/', '-')[-42:-7] + '.json', 'w') as json_file:
-                    json.dump(generate_json(accessFolders[-1].replace('/', '-')[-18:-7], collectionName, CSVFile, os.path.dirname(i), accessFolders[-1].replace(collectionPrefix, ''), collectionPrefix[0:-1]), json_file)
+                    json.dump(generate_json(accessFolders[-1].replace('/', '-')[-42:-7], collectionName, CSVFile, os.path.dirname(i), accessFolders[-1].replace(collectionPrefix, ''), collectionPrefix[0:-1]), json_file)

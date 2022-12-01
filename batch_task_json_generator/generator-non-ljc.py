@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-import json, boto3, os, sys, shutil
+import json, boto3, os, sys, shutil, re
 from random import randrange
 
 # Start borrowed code
@@ -54,7 +54,7 @@ def get_matching_s3_keys(bucket, prefix='', suffix=''):
 def generate_json(jobName, collectionName, csvName, csvPath, accessDir, srcBucket = "vtlib-store", destBucket = "img.cloud.lib.vt.edu", destUrl = "https://img.cloud.lib.vt.edu", destPrefix = "iawa", awsRegion="us-east-1", uploadBool="false"):
     return {
         "jobName": jobName,
-        "jobQueue":"QueueForWDC",
+        "jobQueue":"QueueForFeuerstein",
         "jobDefinition":"IAWATileGenerationJob",
         "command":"./createiiif.sh",
         "environment":[
@@ -104,7 +104,7 @@ def generate_json(jobName, collectionName, csvName, csvPath, accessDir, srcBucke
             },
             {
                 "name": "DIR_PREFIX",
-                "value": "SpecScans/Women_of_Design"
+                "value": "SpecScans/IAWA2"
             }
         ]
     }
@@ -134,12 +134,13 @@ for i in get_matching_s3_keys('vtlib-store', collectionPath, '.csv'):
     CSVFileNoExt = os.path.splitext(CSVFile)[0]
     accessFolders = []
     # For each CSVfile
-    print(collectionPath + "/" + CSVFileNoExt)
-    for j in get_matching_s3_keys('vtlib-store', collectionPath + "/" + CSVFileNoExt + "/"):
+    print("Generating jobs for " + i)
+    for j in get_matching_s3_keys('vtlib-store', os.path.dirname(i) + "/"):
         # Check if S3 object has "Access" in it
         position = j.find('/Access/')
         # If string contains Access and path already not in accessFolders
         if position != -1 and j[0:position+7] not in accessFolders:
+                print(j[0:position+7])
                 accessFolders.append(j[0:position+7])
                 with open(jsonStore + '/' + 'A_' + accessFolders[-1].replace('/', '-')[-30:-7] + str(randrange(0, 100001, 2)) + '.json', 'w') as json_file:
-                    json.dump(generate_json('A_' + accessFolders[-1].replace('/', '-')[-50:-7] + str(randrange(0, 100001, 2)), collectionName, CSVFile, os.path.dirname(i), accessFolders[-1].replace('SpecScans/Women_of_Design/','')), json_file)
+                    json.dump(generate_json('A_' + accessFolders[-1].replace('/', '-')[-50:-7] + str(randrange(0, 100001, 2)), collectionName, CSVFile, os.path.dirname(i), accessFolders[-1].replace(collectionPrefix, '')), json_file)

@@ -51,7 +51,7 @@ def get_matching_s3_keys(bucket, prefix='', suffix=''):
 ######
 # End borrowed code
 
-def generate_json(jobName, collectionName, csvName, csvPath, accessDir, srcBucket = "vtlib-store", destBucket = "img.cloud.lib.vt.edu", destUrl = "https://img.cloud.lib.vt.edu", destPrefix = "swva", awsRegion="us-east-1", uploadBool="false"):
+def generate_json(jobName, collectionName, csvName, csvPath, accessDir, srcPrefix, srcBucket = "vtlib-store", destBucket = "img.cloud.lib.vt.edu", destUrl = "https://img.cloud.lib.vt.edu", destPrefix = "swva", awsRegion="us-east-1", uploadBool="false"):
     return {
         "jobName": jobName,
         "jobQueue":"QueueForFeuerstein",
@@ -104,7 +104,7 @@ def generate_json(jobName, collectionName, csvName, csvPath, accessDir, srcBucke
             },
             {
                 "name": "DIR_PREFIX",
-                "value": "SWVA"
+                "value": srcPrefix
             }
         ]
     }
@@ -144,4 +144,4 @@ for i in get_matching_s3_keys('vtlib-store', collectionPath, '.csv'):
                 print(os.path.dirname(j))
                 accessFolders.append(os.path.dirname(j))
                 with open(jsonStore + '/' + accessFolders[-1].replace('/', '-')[-42:-7] + '.json', 'w') as json_file:
-                    json.dump(generate_json(accessFolders[-1].replace('/', '-')[-18:-7], collectionName, CSVFile, os.path.dirname(i), accessFolders[-1].replace(collectionPrefix, '')), json_file)
+                    json.dump(generate_json(accessFolders[-1].replace('/', '-')[-18:-7], collectionName, CSVFile, os.path.dirname(i), accessFolders[-1].replace(collectionPrefix, ''), collectionPrefix[0:-1]), json_file)

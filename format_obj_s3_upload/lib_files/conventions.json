@@ -1,0 +1,14 @@
+{
+  "dil": {
+    "identifier_start": 0,
+    "identifier_end": 13,
+    "collection_start": 0,
+    "collection_end": 3,
+    "type_start": 3,
+    "type_end": 5,
+    "first_enum_start": 5,
+    "first_enum_end": 8,
+    "second_enum_start": 8,
+    "second_enum_end": 11
+  }
+}

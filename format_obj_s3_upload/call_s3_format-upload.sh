@@ -2,6 +2,8 @@
 
 AWS_REGION="us-east-1" \
 COLLECTION_CATEGORY="federated" \
+
+#changes add temp so its temp and look at py file in order to figure out the naming conventions.
 COLLECTION_NAME="vtec" \
 CSV_FULL_PATH="federated/vtec/vtec_flat/entomology2d_2024apr12_archive_metadata.csv" \
 SRC="jennifer-vtec2d-formatting" \
@@ -13,3 +15,5 @@ TARGET_ROOT="federated/vtec/vtec_formatted/" \
 DELETE_SRC="false" \
 FILE_NAME_CONVENTION="dil" \
 python3 s3_format-upload.py 
+
+

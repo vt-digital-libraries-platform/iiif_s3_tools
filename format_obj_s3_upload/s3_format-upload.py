@@ -191,6 +191,7 @@
 # # Delete the src directory if local, exists and we're supposed to
 # if not src_is_s3 and os.path.exists(src_path) and os.path.isdir(src_path) and env['delete_src'] == "true":
 #     shutil.rmtree(src_path)
+import sys
 import boto3
 import mimetypes
 import os

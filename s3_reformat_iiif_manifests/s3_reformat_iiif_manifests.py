@@ -38,12 +38,12 @@ def csv_to_dataframe(csv_path):
             'End Date': str})
     return df
 
-bucket = 'img.cloud.lib.vt.edu'
+bucket = '<s3-bucket-hostname>'
 src_path = os.path.join('federated')
 
 # This is the collection you want to move tiles/manifests to.
 parent_collection_identifier = '<collection-identifier>'
-collection_url = f'https://img.cloud.lib.vt.edu/federated/{parent_collection_identifier}/'
+collection_url = f'https://{bucket}/federated/{parent_collection_identifier}/'
 
 # These are the sub-collections you want to move tiles/manifests from.
 sub_collections = ['<sub-collection-identifier-1>', '<sub-collection-identifier-2>', '<sub-collection-identifier-3>']
@@ -62,7 +62,7 @@ for identifier in sub_collections:
         file_text = ''
         with open(fileName, 'r', encoding='utf-8') as f:
             for line in f.readlines():
-                edited_line = line.replace(f"https://img.cloud.lib.vt.edu/federated/{identifier}/", collection_url)
+                edited_line = line.replace(f"https://{bucket}/federated/{identifier}/", collection_url)
                 file_text += edited_line
         
         

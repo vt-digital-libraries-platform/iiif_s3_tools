@@ -34,9 +34,9 @@ def get_records_for_minting():
 
 types = ["Archive", "Collection"]
 for type in types:
-    recordTable = dyndb.Table(f"{type}-77eik3yv7rbdbjhjemas6h7dmi-vtdlppprd")
+    recordTable = dyndb.Table(f"{type}-<amplify-backend-id>-vtdlppprd")
     category = "item" if type == "Archive" else "collection"
-    long_url = f"https://{site}-pprd.d3reyduta3lkkz.amplifyapp.com/{type.lower()}/"
+    long_url = f"https://{site}-pprd.<amplify-app-id>.amplifyapp.com/{type.lower()}/"
     records = get_records_for_minting()
     numCreated = 0
     print(f"{len(records)} records found for {type} in {site}")
@@ -48,7 +48,7 @@ for type in types:
         noidRecord = {
             "short_id": short_id,
             "long_url": os.path.join(long_url, short_id),
-            "short_url": os.path.join("https://065ykk5p42.execute-api.us-east-1.amazonaws.com/Prod/ark:/53696", short_id),
+            "short_url": os.path.join("https://<api-gateway-id>.execute-api.us-east-1.amazonaws.com/Prod/ark:/53696", short_id),
             "created_at": insert_date_str,
             "hits": 0,
             "ttl": 4129578000,

@@ -42,7 +42,7 @@ pathlib.Path(target_dir).mkdir(parents=True, exist_ok=True)
 #         job_file = get_job_file_src_path(row.identifier)
 #         shutil.copyfile(job_file, os.path.join(target_dir, os.path.basename(job_file)))
 
-# Based on presence of manifest.json file in img.cloud.lib.vt.edu
+# Based on presence of manifest.json file in <s3-bucket-hostname>
 df = csv_to_dataframe(os.path.join(metadata_path, metadata_filename))
 not_found = 1
 for idx, row in df.iterrows():

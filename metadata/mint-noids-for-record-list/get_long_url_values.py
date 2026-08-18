@@ -8,7 +8,7 @@ urlValues = []
 
 def get_records_for_minting():
         scan_kwargs = {
-            "FilterExpression": Attr('long_url').contains("https://federated-pprd.dlp.cloud.lib.vt.edu"),
+            "FilterExpression": Attr('long_url').contains("https://<old-domain>"),
             "ProjectionExpression": "short_id, long_url",
         }
         table_items = []

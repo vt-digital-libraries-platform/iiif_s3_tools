@@ -171,13 +171,13 @@ for record in get_table_items(archiveTable):
 
 
 # "assets": {
-#     "iiif_manifest": "https://d21nnzi4oh5qvs.cloudfront.net/federated/vtec/VTEC000007235/manifest.json",
+#     "iiif_manifest": "https://<cloudfront-distribution-id>.cloudfront.net/federated/vtec/VTEC000007235/manifest.json",
 #     "media_type": "3d_2diiif",
-#     "x3d_config": "https://d21nnzi4oh5qvs.cloudfront.net/federated/vtec/VTEC000007235/3d/LowRes_VTEC000007235_X3D.x3d",
-#     "x3d_src_img": "https://d21nnzi4oh5qvs.cloudfront.net/federated/vtec/VTEC000007235/3d/LowRes_VTEC000007235_X3D.png"
+#     "x3d_config": "https://<cloudfront-distribution-id>.cloudfront.net/federated/vtec/VTEC000007235/3d/LowRes_VTEC000007235_X3D.x3d",
+#     "x3d_src_img": "https://<cloudfront-distribution-id>.cloudfront.net/federated/vtec/VTEC000007235/3d/LowRes_VTEC000007235_X3D.png"
 
-#      "env_config": "https://d21nnzi4oh5qvs.cloudfront.net/federated/3d/gltf/studio.env",
-#    "gltf_config": "https://d21nnzi4oh5qvs.cloudfront.net/federated/3d/gltf/Egg1GlbTest.glb",
+#      "env_config": "https://<cloudfront-distribution-id>.cloudfront.net/federated/3d/gltf/studio.env",
+#    "gltf_config": "https://<cloudfront-distribution-id>.cloudfront.net/federated/3d/gltf/Egg1GlbTest.glb",
 #    "media_type": "3d-model/gltf"
 # }
 

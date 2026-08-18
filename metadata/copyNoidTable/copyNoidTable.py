@@ -7,7 +7,7 @@ target = dyndb.Table("")
 
 def getRecordsToCopy():
         scan_kwargs = {
-            "FilterExpression": Attr('long_url').contains("https://federated-pprd.dlp.cloud.lib.vt.edu"),
+            "FilterExpression": Attr('long_url').contains("https://<old-domain>"),
             "ProjectionExpression": "created_at, hits, long_url, short_id, short_url, #ttl",
             "ExpressionAttributeNames": {"#ttl": "ttl"}
         }
@@ -32,9 +32,9 @@ print()
 print("======================================================")
 print("Number of records: ", len(records))
 
-# https://federated-pprd.d3reyduta3lkkz.amplifyapp.com/
-for record in records: 
-    record['long_url'] = record['long_url'].replace("https://federated-pprd.dlp.cloud.lib.vt.edu", "https://federated-pprd.d3reyduta3lkkz.amplifyapp.com")
+# https://federated-pprd.<amplify-app-id>.amplifyapp.com/
+for record in records:
+    record['long_url'] = record['long_url'].replace("https://<old-domain>", "https://federated-pprd.<amplify-app-id>.amplifyapp.com")
     record['hits'] = 0
     newNoidResponse = target.put_item(Item=record)
     success = (newNoidResponse["ResponseMetadata"]["HTTPStatusCode"] == 200)

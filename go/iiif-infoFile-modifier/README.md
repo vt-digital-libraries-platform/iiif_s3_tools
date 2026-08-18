@@ -35,7 +35,7 @@ Given an original `info.json` like [`incorrect_info.json`](incorrect_info.json):
 ```json
 {
   "@context": "http://iiif.io/api/image/2/context.json",
-  "@id": "https://d21nnzi4oh5qvs.cloudfront.net/federated/glink/tiles/glink002121-1",
+  "@id": "https://<cloudfront-distribution-id>.cloudfront.net/federated/glink/tiles/glink002121-1",
   "protocol": "http://iiif.io/api/image",
   "width": 4309,
   "height": 2702,
@@ -53,7 +53,7 @@ the tool writes back [`corrected_info.json`](corrected_info.json):
 ```json
 {
   "@context": "http://iiif.io/api/image/2/context.json",
-  "@id": "https://d21nnzi4oh5qvs.cloudfront.net/federated/glink/tiles/glink002121-1",
+  "@id": "https://<cloudfront-distribution-id>.cloudfront.net/federated/glink/tiles/glink002121-1",
   "profile": [
     "http://iiif.io/api/image/2/level0.json",
     {

@@ -118,8 +118,8 @@ func TestEvaluateItemNestedNativeMap(t *testing.T) {
 	// the Archive table: a native nested Map attribute, not a JSON string.
 	cfg := &Config{
 		FieldName:     "archiveOptions",
-		MatchPrefix:   "https://d21nnzi4oh5qvs.cloudfront.net",
-		NewValue:      "https://d4qp6z580yvb5.cloudfront.net",
+		MatchPrefix:   "https://<old-distribution-id>.cloudfront.net",
+		NewValue:      "https://<new-distribution-id>.cloudfront.net",
 		IsJSON:        true,
 		JSONFieldPath: "assets.env_config",
 	}
@@ -128,8 +128,8 @@ func TestEvaluateItemNestedNativeMap(t *testing.T) {
 	item := map[string]types.AttributeValue{
 		"archiveOptions": &types.AttributeValueMemberM{Value: map[string]types.AttributeValue{
 			"assets": &types.AttributeValueMemberM{Value: map[string]types.AttributeValue{
-				"env_config":  &types.AttributeValueMemberS{Value: "https://d21nnzi4oh5qvs.cloudfront.net/federated/3d/gltf/studio.env"},
-				"gltf_config": &types.AttributeValueMemberS{Value: "https://d4qp6z580yvb5.cloudfront.net/federated/vtec/VTEC000000374/3d/VTEC000000374.glb"},
+				"env_config":  &types.AttributeValueMemberS{Value: "https://<old-distribution-id>.cloudfront.net/federated/3d/gltf/studio.env"},
+				"gltf_config": &types.AttributeValueMemberS{Value: "https://<new-distribution-id>.cloudfront.net/federated/vtec/VTEC000000374/3d/VTEC000000374.glb"},
 				"media_type":  &types.AttributeValueMemberS{Value: "3d-model/gltf"},
 			}},
 			"config": &types.AttributeValueMemberM{Value: map[string]types.AttributeValue{
@@ -147,10 +147,10 @@ func TestEvaluateItemNestedNativeMap(t *testing.T) {
 	if !matched {
 		t.Fatalf("expected match")
 	}
-	if oldVal != "https://d21nnzi4oh5qvs.cloudfront.net/federated/3d/gltf/studio.env" {
+	if oldVal != "https://<old-distribution-id>.cloudfront.net/federated/3d/gltf/studio.env" {
 		t.Fatalf("unexpected oldVal: %q", oldVal)
 	}
-	if newVal != "https://d4qp6z580yvb5.cloudfront.net/federated/3d/gltf/studio.env" {
+	if newVal != "https://<new-distribution-id>.cloudfront.net/federated/3d/gltf/studio.env" {
 		t.Fatalf("unexpected newVal: %q", newVal)
 	}
 
@@ -160,7 +160,7 @@ func TestEvaluateItemNestedNativeMap(t *testing.T) {
 		t.Fatalf("env_config not updated in place, got %q", got)
 	}
 	// Untouched sibling fields must survive unchanged.
-	if got := assets["gltf_config"].(*types.AttributeValueMemberS).Value; got != "https://d4qp6z580yvb5.cloudfront.net/federated/vtec/VTEC000000374/3d/VTEC000000374.glb" {
+	if got := assets["gltf_config"].(*types.AttributeValueMemberS).Value; got != "https://<new-distribution-id>.cloudfront.net/federated/vtec/VTEC000000374/3d/VTEC000000374.glb" {
 		t.Fatalf("gltf_config was unexpectedly modified: %q", got)
 	}
 	config := root["config"].(*types.AttributeValueMemberM).Value

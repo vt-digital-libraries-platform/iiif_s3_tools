@@ -4,15 +4,15 @@
 # COLLECTION_CATEGORY="federated" \
 # COLLECTION_NAME="vtec" \
 # CSV_FULL_PATH="federated/vtec/vtec_flat/entomology2d_2024apr12_archive_metadata.csv" \
-# SRC="jennifer-vtec2d-formatting" \
+# SRC="<s3-bucket>" \
 # SRC_IS_S3="true" \
 # SRC_ROOT="federated/vtec/vtec_flat" \
-# TARGET="jennifer-vtec2d-formatting" \
+# TARGET="<s3-bucket>" \
 # TARGET_IS_S3="true" \
 # TARGET_ROOT="federated/vtec/vtec_formatted/" \
 # DELETE_SRC="false" \
 # FILE_NAME_CONVENTION="dil" \
 # python3 s3_format-upload.py 
 
-# s3://vtdlp-s3-tunnel-prod/federated/hokies/20241114_hokies_all_archive_metadata.csv
+# s3://<s3-bucket>/federated/hokies/20241114_hokies_all_archive_metadata.csv
 # assets/hokies/meta/20250117_hokst-test_archive_metadata.csv

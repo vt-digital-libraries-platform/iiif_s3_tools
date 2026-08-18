@@ -1,0 +1,33 @@
+{
+  "@context": "http://iiif.io/api/image/2/context.json",
+  "@id": "https://< something something >.cloudfront.net/federated/glink/tiles/glink002121-1",
+  "profile": [
+    "http://iiif.io/api/image/2/level0.json",
+    {
+      "formats": [
+        "jpg"
+      ],
+      "qualities": [
+        "default"
+      ],
+      "supports": [
+        "cors",
+        "baseUriRedirect"
+      ]
+    }
+  ],
+  "protocol": "http://iiif.io/api/image",
+  "tiles": [
+    {
+      "scaleFactors": [
+        1,
+        2,
+        4,
+        8
+      ],
+      "width": 512
+    }
+  ],
+  "width": 4309,
+  "height": 2702
+}

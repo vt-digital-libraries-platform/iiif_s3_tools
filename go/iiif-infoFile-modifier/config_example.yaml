@@ -1,0 +1,33 @@
+# Example configuration for iiif-infoFile-modifier.
+# Copy this file (e.g. `cp config.yaml myconfig.yaml`) and adjust the values
+# below, then run with: iiif-infoFile-modifier -config myconfig.yaml
+
+# AWS region the bucket lives in.
+region: us-east-1
+
+# S3 bucket containing the IIIF info.json files.
+bucket: < your bucket name >
+
+# Key prefix for the collection. Should NOT have a leading slash; a trailing
+# slash is optional (one is added automatically if missing).
+collection_prefix: path/to/collection
+
+# Name of the info.json file to look for within each item's tile directory.
+info_file_name: info.json
+
+# Name of the backup file written alongside each info.json, at the same S3
+# "directory" (key prefix), before any modification is made.
+backup_file_name: backup_info.json
+
+# Directory name, directly under collection_prefix, holding one subdirectory
+# per item's tiles. Only info.json objects at the default per-item layout
+#   <collection_prefix>/<tiles_dir_name>/<item_identifier>-<index>/info.json
+# are read/written; other info.json files required by the IIIF spec (e.g.
+# presentation manifests) live outside this path, are formatted differently,
+# and must not be touched.
+tiles_dir_name: tiles
+
+# When true, the bucket is scanned and planned changes are reported but no
+# objects are written to S3 (no backups, no modified info.json). Can also be
+# forced on with the -dry-run CLI flag regardless of what is set here.
+dry_run: false

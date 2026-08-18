@@ -2,3 +2,7 @@ format_obj_s3_upload/s3_format-caller.sh
 format_obj_s3_upload/lib_files/__pycache__
 fchs_format_upload
 index_csv_generator
+json_files
+batch_task_json_generator/run-task-generator.sh
+go/iiif-infoFile-modifier/config.yaml
+go/ddb-field-updater/config.yaml

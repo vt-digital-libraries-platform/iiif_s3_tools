@@ -1,0 +1,44 @@
+# Example configuration for ddb-field-updater.
+# Copy this file (e.g. `cp config_example.yaml config.yaml`) and adjust the values
+# below, then run with: ddb-field-updater -config myconfig.yaml
+
+# AWS region the table lives in.
+region: us-east-1
+
+# DynamoDB table to scan.
+table_name: < your table name >
+
+# Name of the item attribute to inspect. Must be a String (S) attribute
+# (this includes AppSync AWSJSON fields, which DynamoDB stores as a String
+# containing JSON text -- see is_json below).
+field_name: archiveOptions
+
+# If the attribute's value starts with this prefix, it will be updated.
+match_prefix: "https://< something something >.cloudfront.net"
+
+# The matching prefix is replaced with this value; the remainder of the
+# original string (everything after the matched prefix) is kept as-is.
+# Example: "old-prefix-1234" -> "new-prefix-1234"
+new_value: "https://< something something >.cloudfront.net"
+
+# Set to true if field_name points to an AWSJSON attribute -- i.e. the
+# DynamoDB String value is itself JSON text, and the field you actually want
+# to match/replace is nested inside that JSON rather than being the field's
+# value directly. Defaults to false (field_name's value is compared/replaced
+# as a plain string, as shown above).
+is_json: true
+
+# Dot-separated path to the nested field inside the parsed JSON to
+# match/replace (only used when is_json is true). Each segment is a JSON
+# object key, or an integer to index into a JSON array.
+# Example: for field_name's JSON value {"metadata":{"identifiers":{"primary":"old-prefix-1234"}}},
+# json_field_path: "metadata.identifiers.primary" targets "old-prefix-1234".
+# Only the nested field is changed; the rest of the JSON is re-serialized
+# unchanged (note: unrelated object keys will be alphabetized and whitespace
+# normalized as a side effect of re-serializing the JSON).
+json_field_path: "assets.env_config"
+
+# When true, the table is scanned and matches are reported but no writes
+# are made to DynamoDB. Can also be forced on with the -dry-run CLI flag
+# regardless of what is set here.
+dry_run: false

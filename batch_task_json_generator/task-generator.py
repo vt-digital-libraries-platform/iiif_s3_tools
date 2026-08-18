@@ -2,9 +2,6 @@
 import json, boto3, os, sys, shutil, re
 from random import randrange
 
-
-# Start borrowed code
-# Code from https://github.com/alexwlchan/alexwlchan.net/tree/live/misc/matching_s3_objects
 def get_matching_s3_keys(bucket, prefix="", suffix=""):
     """
     Generate objects in an S3 bucket.
@@ -16,14 +13,11 @@ def get_matching_s3_keys(bucket, prefix="", suffix=""):
     """
     s3 = boto3.client("s3")
     kwargs = {"Bucket": bucket}
-    # If the prefix is a single string (not a tuple of strings), we can
-    # do the filtering directly in the S3 API.
+
     if isinstance(prefix, str):
         kwargs["Prefix"] = prefix
 
     while True:
-        # The S3 API response is a large blob of metadata.
-        # 'Contents' contains information about the listed objects.
         resp = s3.list_objects_v2(**kwargs)
         try:
             contents = resp["Contents"]
@@ -34,16 +28,11 @@ def get_matching_s3_keys(bucket, prefix="", suffix=""):
             if key.startswith(prefix) and key.endswith(suffix):
                 yield key
 
-        # The S3 API is paginated, returning up to 1000 keys at a time.
-        # Pass the continuation token into the next response, until we
-        # reach the final page (when this field is missing).
         try:
             kwargs["ContinuationToken"] = resp["NextContinuationToken"]
         except KeyError:
             break
 
-
-# End borrowed code
 
 
 def generate_json(
@@ -105,8 +94,6 @@ if os.path.exists(jsonStore) and os.path.isdir(jsonStore):
 # Create directory for storing the JSON files
 os.makedirs(jsonStore)
 
-print("Processing directories -")
-
 # Get csvFile.csv
 csvFileWPath = os.path.join(env["csvPath"], env["csvName"])
 csvFile = os.path.basename(csvFileWPath)
@@ -117,7 +104,6 @@ accessFolders = []
 # Generate jobs for each item directory in collection
 print("Generating jobs for " + csvFileWPath)
 for j in get_matching_s3_keys(env["awsSrcBucket"], os.path.join(collectionPath)):
-    print(j)
     # Check if S3 object has "Access" in it
     position = j.find("/Access/")
     # If string contains Access and path already not in accessFolders

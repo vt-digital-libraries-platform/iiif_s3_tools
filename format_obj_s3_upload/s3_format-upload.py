@@ -79,6 +79,7 @@ env['src_root'] = os.getenv('SRC_ROOT')
 env['target'] = os.getenv('TARGET')
 env['target_is_s3'] = os.getenv('TARGET_IS_S3')
 env['target_root'] = os.getenv('TARGET_ROOT')
+env['file_type'] = os.getenv('FILE_TYPE')
 env['delete_src'] = os.getenv('DELETE_SRC')
 env['file_name_convention'] = os.getenv('FILE_NAME_CONVENTION')
 
@@ -126,8 +127,12 @@ if src_is_s3:
         sys.exit(1)
 
     for i in get_matching_s3_keys(env['src'], env['src_root']):
-        if is_img_file(i):
+        # if is_img_file(i):
+            print(i)
             file_list.append(i)
+    print()
+    print()
+    print()
 else:
     csv_data = csv_to_dataframe(env['csv_full_path']).itertuples()
     for root, dirs, files in os.walk(src_path):
@@ -138,7 +143,7 @@ else:
 for row in csv_data:
   item_data = get_item_data_by_convention(env['file_name_convention'], row.identifier)
   item_identifier = item_data['identifier']
-  print(f"Looking for images that belong in: {item_identifier}")
+  print(f"Looking for {env['file_type']}s that belong in: {item_identifier}")
   files_found = False
   for file in file_list:
       file_name = os.path.basename(file)

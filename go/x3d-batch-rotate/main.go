@@ -25,6 +25,18 @@ type Config struct {
 	InputDir  string `yaml:"input_dir"`
 	OutputDir string `yaml:"output_dir"`
 
+	// Identifier-driven fetch phase: when IdentifiersFile is set, models
+	// are downloaded into InputDir from DynamoDB/S3-or-CloudFront before
+	// the usual rotate/render phase runs over InputDir. See fetch.go.
+	IdentifiersFile     string `yaml:"identifiers_file"`
+	Region              string `yaml:"region"`
+	TableName           string `yaml:"table_name"`
+	LookupMode          string `yaml:"lookup_mode"`
+	PartitionKeyAttr    string `yaml:"partition_key_attr"`
+	IdentifierAttr      string `yaml:"identifier_attr"`
+	IdentifierPrefix    string `yaml:"identifier_prefix"`
+	ArchiveOptionsField string `yaml:"archive_options_field"`
+
 	Degrees       float64 `yaml:"degrees"`
 	Axis          string  `yaml:"axis"`
 	RotatedPrefix string  `yaml:"rotated_prefix"`
@@ -85,10 +97,33 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.RotatedSuffix == "" {
 		cfg.RotatedSuffix = "_rotated.PNG"
 	}
+	if cfg.LookupMode == "" {
+		cfg.LookupMode = "get_item"
+	}
+	if cfg.PartitionKeyAttr == "" {
+		cfg.PartitionKeyAttr = "id"
+	}
+	if cfg.IdentifierAttr == "" {
+		cfg.IdentifierAttr = "identifier"
+	}
+	if cfg.ArchiveOptionsField == "" {
+		cfg.ArchiveOptionsField = "archiveOptions"
+	}
 
 	var missing []string
 	if cfg.InputDir == "" {
 		missing = append(missing, "input_dir")
+	}
+	if cfg.IdentifiersFile != "" {
+		if cfg.Region == "" {
+			missing = append(missing, "region (required when identifiers_file is set)")
+		}
+		if cfg.TableName == "" {
+			missing = append(missing, "table_name (required when identifiers_file is set)")
+		}
+		if cfg.LookupMode != "get_item" && cfg.LookupMode != "scan" {
+			missing = append(missing, `lookup_mode (must be "get_item" or "scan")`)
+		}
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("config missing required field(s): %s", strings.Join(missing, ", "))
@@ -306,6 +341,7 @@ func main() {
 	inputDir := flag.String("input", "", "override input_dir from the config file")
 	outputDir := flag.String("output", "", "override output_dir from the config file")
 	degrees := flag.Float64("degrees", 0, "override degrees from the config file (0 means: use config value)")
+	identifiersFile := flag.String("identifiers", "", "override identifiers_file from the config file; fetch models from DynamoDB before rotating/rendering")
 	flag.Parse()
 
 	cfg, err := loadConfig(*configPath)
@@ -327,8 +363,20 @@ func main() {
 	if *degrees != 0 {
 		cfg.Degrees = *degrees
 	}
+	if *identifiersFile != "" {
+		cfg.IdentifiersFile = *identifiersFile
+	}
 
 	start := time.Now()
+
+	var fetchedN, fetchFailedN int
+	if cfg.IdentifiersFile != "" {
+		fetchedN, fetchFailedN, err = fetchAll(cfg)
+		if err != nil {
+			log.Fatalf("fatal: %v", err)
+		}
+	}
+
 	results, err := run(cfg)
 	if err != nil {
 		log.Fatalf("fatal: %v", err)
@@ -352,10 +400,10 @@ func main() {
 		}
 	}
 
-	log.Printf("done: found=%d rotated=%d rendered_initial=%d rendered_rotated=%d failed=%d elapsed=%s",
-		len(results), rotatedN, initN, rotN, failedN, time.Since(start).Round(time.Second))
+	log.Printf("done: fetched=%d fetch_failed=%d found=%d rotated=%d rendered_initial=%d rendered_rotated=%d failed=%d elapsed=%s",
+		fetchedN, fetchFailedN, len(results), rotatedN, initN, rotN, failedN, time.Since(start).Round(time.Second))
 
-	if failedN > 0 {
+	if failedN > 0 || fetchFailedN > 0 {
 		os.Exit(1)
 	}
 }

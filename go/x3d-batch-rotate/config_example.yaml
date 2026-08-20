@@ -3,7 +3,9 @@
 # the values below, then run with: x3d-batch-rotate -config config.yaml
 
 # Directory containing the .x3d files to process (only files directly in
-# this directory are considered, not subdirectories).
+# this directory are considered, not subdirectories). If identifiers_file
+# (below) is set, models are downloaded into this directory before it's
+# scanned, so it does not need to pre-exist or already contain anything.
 input_dir: /path/to/models
 
 # Directory rotated .x3d files and rendered PNGs are written to. Defaults
@@ -11,6 +13,57 @@ input_dir: /path/to/models
 # texture, rotated model, renders) lives side by side, exactly like the
 # original archive asset layout.
 output_dir: /path/to/models
+
+# --- Fetch phase (optional) ---
+# When identifiers_file is set, the tool first reads a JSON array of
+# identifier strings from it (e.g. ["368a8114", "abcd1234"]), looks each
+# one up in DynamoDB via the AWS CLI (`aws dynamodb get-item` / `scan` --
+# requires the "aws" binary on PATH and working credentials, e.g. via
+# `aws configure` or the usual AWS_* environment variables; this tool sets
+# nothing itself), reads its "archiveOptions" attribute (a JSON string;
+# AppSync AWSJSON fields are stored this way), and downloads the model at
+# archiveOptions.assets.x3d_config plus its texture (found by parsing the
+# downloaded model's own <ImageTexture url="..."> reference, so the
+# texture filename never needs to be guessed or hardcoded) into input_dir.
+# A failure for one identifier is logged and does not stop the others --
+# the rotate/render phase below then simply runs over whatever .x3d files
+# actually made it into input_dir. Leave unset (the default) to skip this
+# phase entirely and just process .x3d files already sitting in input_dir.
+identifiers_file: ""
+
+# AWS region and DynamoDB table the fetch phase looks identifiers up in.
+# Required only when identifiers_file is set.
+region: us-east-1
+table_name: < your table name >
+
+# How to look an identifier up:
+#   get_item -- identifier IS the table's partition key value; a single
+#               `aws dynamodb get-item` call. Fast, and the default.
+#   scan     -- identifier is the value of some other attribute
+#               (identifier_attr, below); `aws dynamodb scan` with a
+#               filter expression. Works regardless of key schema, but
+#               reads the whole table on every lookup -- fine for a
+#               handful of identifiers, slow for large batches/tables.
+lookup_mode: get_item
+
+# DynamoDB attribute name used as the GetItem key, when lookup_mode is
+# get_item.
+partition_key_attr: id
+
+# DynamoDB attribute name to filter on, when lookup_mode is scan.
+identifier_attr: identifier
+
+# Prepended to every identifier from identifiers_file before it's used to
+# look the item up (via either mode). Useful when identifiers are bare
+# suffixes of a longer key value, e.g. identifier_attr: custom_key with
+# identifier_prefix: "ark:/53696/" to turn "368a8114" into the actual
+# stored value "ark:/53696/368a8114". Leave empty (the default) to match
+# identifiers exactly as given.
+identifier_prefix: ""
+
+# DynamoDB attribute holding the model's JSON config as a string. The
+# download URL is read from this JSON at assets.x3d_config.
+archive_options_field: archiveOptions
 
 # Rotation applied to a copy of each model. Positive/negative sign controls
 # direction; axis is an X3D SFVec3f string. "1 0 0" with a negative angle

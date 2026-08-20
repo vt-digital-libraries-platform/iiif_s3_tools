@@ -3,17 +3,24 @@
 Batch-processes a directory of X3D models: for each `.x3d` file, writes a
 rotated copy and — unless rendering is disabled — renders PNG snapshots of
 the model in its original and rotated orientations, using headless Chrome
-to run the same X3DOM viewer the DLP archive site uses.
+to run the same X3DOM viewer the DLP archive site uses. Optionally, it can
+first populate that directory itself by downloading models for a list of
+archive identifiers looked up in DynamoDB.
 
-This automates, for a whole directory at once, the manual workflow of
-opening a model in a browser, dragging to rotate it, and screenshotting the
+This automates, for a whole batch at once, the manual workflow of opening
+a model in a browser, dragging to rotate it, and screenshotting the
 result.
 
 ## What it does
 
-For each `<name>.x3d` file directly inside `input_dir` (subdirectories are
-not scanned, and files already carrying the `rotated_` prefix are skipped
-so re-running the tool over its own output is safe):
+**Fetch phase (optional).** If `identifiers_file` is set, see
+[Fetching models by identifier](#fetching-models-by-identifier) below —
+this populates `input_dir` before the rest of the tool runs.
+
+**Rotate/render phase.** For each `<name>.x3d` file directly inside
+`input_dir` (subdirectories are not scanned, and files already carrying
+the `rotated_` prefix are skipped so re-running the tool over its own
+output is safe):
 
 1. **Rotates.** Wraps everything between `<Scene>` and `</Scene>` in one
    new `<Transform rotation="<axis> <angle>">` node and writes the result
@@ -46,6 +53,46 @@ sign of `degrees` for the opposite direction; change `axis` for a
 different rotation axis (e.g. `"0 1 0"` to spin around the vertical axis
 instead).
 
+## Fetching models by identifier
+
+Instead of (or in addition to — a partial fetch failure just leaves fewer
+`.x3d` files for the rotate/render phase to find) manually placing `.x3d`
+files in `input_dir`, point `identifiers_file` at a JSON file containing a
+flat array of identifier strings:
+
+```json
+["368a8114", "abcd1234"]
+```
+
+For each identifier, the tool:
+
+1. Looks the item up in DynamoDB via the **AWS CLI** (`aws dynamodb
+   get-item` or `aws dynamodb scan`, per `lookup_mode` — see the table
+   below). This means it needs the `aws` binary on `PATH` and working
+   credentials (`aws configure`, `AWS_PROFILE`, instance role, etc.) —
+   whatever `aws sts get-caller-identity` would need to succeed. The tool
+   does not use the AWS SDK directly and has no credential configuration
+   of its own.
+2. Reads the item's `archiveOptions` attribute — a DynamoDB String whose
+   *value* is itself JSON text (this is how an AppSync AWSJSON field is
+   stored) — and parses out `assets.x3d_config`, the model's download URL.
+3. Downloads that URL into `input_dir`.
+4. Parses the downloaded model's own `<ImageTexture url="...">`
+   reference and downloads that too (resolved relative to the model's
+   URL), so the texture filename is never guessed or hardcoded — it's
+   whatever the model actually references.
+
+A failure for one identifier (not found, malformed `archiveOptions`,
+download error, ...) is logged and does **not** stop the batch; the
+rotate/render phase afterward just runs over whatever `.x3d` files
+actually made it into `input_dir`. An identifier whose model was already
+downloaded in a previous run is left alone (existing files are never
+overwritten), so re-running the tool with the same `identifiers_file` is
+cheap and safe.
+
+Override `identifiers_file` per-invocation with `-identifiers <path>`
+without editing the config file.
+
 ## Configuration
 
 Config is a YAML file, passed with `-config` (defaults to `config.yaml` in
@@ -55,8 +102,16 @@ comments — copy it to `config.yaml` (or any path) and edit.
 
 | Key | Required | Default | Description |
 |---|---|---|---|
-| `input_dir` | yes | — | Directory containing the `.x3d` files to process. |
+| `input_dir` | yes | — | Directory containing the `.x3d` files to process (and, if `identifiers_file` is set, where fetched models are downloaded to). |
 | `output_dir` | no | `input_dir` | Where rotated `.x3d` files and rendered PNGs go. |
+| `identifiers_file` | no | — | Path to a JSON array of identifier strings; enables the fetch phase. |
+| `region` | if `identifiers_file` set | — | AWS region passed to the `aws` CLI. |
+| `table_name` | if `identifiers_file` set | — | DynamoDB table name. |
+| `lookup_mode` | no | `get_item` | `get_item` (identifier is the table's partition key) or `scan` (identifier is some other attribute's value; reads the whole table per lookup). |
+| `partition_key_attr` | no | `id` | DynamoDB attribute used as the `get_item` key. |
+| `identifier_attr` | no | `identifier` | DynamoDB attribute matched against in `scan` mode. |
+| `identifier_prefix` | no | — | Prepended to each identifier before lookup (e.g. `"ark:/53696/"`). |
+| `archive_options_field` | no | `archiveOptions` | DynamoDB attribute holding the model config as JSON text. |
 | `degrees` | no | `0` | Rotation angle in degrees. Sign controls direction. |
 | `axis` | no | `1 0 0` | X3D `SFVec3f` rotation axis. |
 | `rotated_prefix` | no | `rotated_` | Filename prefix for the rotated `.x3d` output. |
@@ -93,15 +148,19 @@ Flags (all optional, override the config file):
 - `-output <dir>` — override `output_dir`.
 - `-degrees <n>` — override `degrees` (a literal `0` is treated as "use
   the config value", since 0° is a no-op rotation anyway).
+- `-identifiers <path>` — override `identifiers_file`; enables the fetch
+  phase even if unset in the config.
 
 The process logs a summary line at the end:
 
 ```
-done: found=12 rotated=12 rendered_initial=12 rendered_rotated=12 failed=0 elapsed=2m14s
+done: fetched=2 fetch_failed=0 found=12 rotated=12 rendered_initial=12 rendered_rotated=12 failed=0 elapsed=2m14s
 ```
 
-and exits non-zero if any model failed to rotate and/or render (each
-failure is also logged individually as it happens).
+(`fetched`/`fetch_failed` are always `0` when `identifiers_file` isn't
+set.) It exits non-zero if any identifier failed to fetch or any model
+failed to rotate and/or render (each failure is also logged individually
+as it happens).
 
 ## How rendering works
 
@@ -153,8 +212,13 @@ go test ./...     # runs the rotation/text-processing logic against testdata/sam
 ```
 
 `main_test.go` covers `wrapSceneInTransform`, `extractTextureURLs`,
-`isRelativeAssetURL`, `findModels`, and `copyFile` against small fixtures
-— no Chrome or network access is needed to run it. The rendering path
+`isRelativeAssetURL`, `findModels`, and `copyFile` against small fixtures.
+`fetch_test.go` covers the DynamoDB-item and `archiveOptions` JSON parsing,
+URL resolution, and download logic in `fetch.go`; `cliRunner` (the `aws`
+CLI invocation) is a package-level variable specifically so tests can
+substitute a fake implementation, and downloads are tested against a real
+`httptest.Server` rather than mocked. None of this needs network access,
+AWS credentials, or the `aws` binary to run. The rendering path
 (`render.go`) is exercised by manual end-to-end runs rather than the test
 suite, since it requires a real Chrome install and downloads the X3DOM
 runtime from the VT CDN.

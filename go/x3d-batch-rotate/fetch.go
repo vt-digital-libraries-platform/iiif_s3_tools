@@ -14,6 +14,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
@@ -90,29 +91,45 @@ func fetchDDBItem(ctx context.Context, client ddbAPI, cfg *Config, identifier st
 	}
 }
 
+// archiveOptionsConfig is the shape extractX3DConfigURL needs out of an
+// item's archiveOptions attribute, however that attribute is stored.
+type archiveOptionsConfig struct {
+	Assets struct {
+		X3DConfig string `json:"x3d_config" dynamodbav:"x3d_config"`
+	} `json:"assets" dynamodbav:"assets"`
+}
+
 // extractX3DConfigURL parses a DynamoDB item's archiveOptions attribute
-// (itself a JSON string, e.g. an AppSync AWSJSON field) and returns the
-// download URL at assets.x3d_config inside it.
+// and returns the download URL at assets.x3d_config inside it.
+//
+// archiveOptions is an AppSync AWSJSON-typed field. In this table it is
+// stored as a native DynamoDB Map (M) — i.e. already broken out into
+// nested M/L/S/N/BOOL attributes, not JSON-encoded text — which
+// attributevalue.UnmarshalMap decodes directly. A plain String (S)
+// attribute is also accepted and parsed as JSON text, for tables (or
+// hand-written test fixtures) that store AWSJSON that way instead.
 func extractX3DConfigURL(item map[string]types.AttributeValue, archiveOptionsField string) (string, error) {
 	attr, ok := item[archiveOptionsField]
 	if !ok {
 		return "", fmt.Errorf("item has no attribute %q", archiveOptionsField)
 	}
-	strAttr, ok := attr.(*types.AttributeValueMemberS)
-	if !ok {
-		return "", fmt.Errorf("attribute %q is not a String", archiveOptionsField)
+
+	var parsed archiveOptionsConfig
+	switch v := attr.(type) {
+	case *types.AttributeValueMemberM:
+		if err := attributevalue.UnmarshalMap(v.Value, &parsed); err != nil {
+			return "", fmt.Errorf("decoding %s (Map): %w", archiveOptionsField, err)
+		}
+	case *types.AttributeValueMemberS:
+		if err := json.Unmarshal([]byte(v.Value), &parsed); err != nil {
+			return "", fmt.Errorf("parsing %s (String) as JSON: %w", archiveOptionsField, err)
+		}
+	default:
+		return "", fmt.Errorf("attribute %q is neither a Map nor a String (AWSJSON), got %T", archiveOptionsField, attr)
 	}
 
-	var parsed struct {
-		Assets struct {
-			X3DConfig string `json:"x3d_config"`
-		} `json:"assets"`
-	}
-	if err := json.Unmarshal([]byte(strAttr.Value), &parsed); err != nil {
-		return "", fmt.Errorf("parsing %s as JSON: %w", archiveOptionsField, err)
-	}
 	if parsed.Assets.X3DConfig == "" {
-		return "", fmt.Errorf("%s JSON has no assets.x3d_config", archiveOptionsField)
+		return "", fmt.Errorf("%s has no assets.x3d_config", archiveOptionsField)
 	}
 	return parsed.Assets.X3DConfig, nil
 }

@@ -78,9 +78,13 @@ For each identifier, the tool:
    uses the SDK's default credential chain — environment variables,
    `~/.aws/credentials`, SSO, an instance/task role, etc.; there is no
    credential configuration in `config.yaml`.
-2. Reads the item's `archiveOptions` attribute — a DynamoDB String whose
-   *value* is itself JSON text (this is how an AppSync AWSJSON field is
-   stored) — and parses out `assets.x3d_config`, the model's download URL.
+2. Reads the item's `archiveOptions` attribute — an AppSync AWSJSON-typed
+   field — and parses out `assets.x3d_config`, the model's download URL.
+   AWSJSON fields can be stored in DynamoDB either as a native Map (M) of
+   nested M/L/S/N/BOOL attributes, or as a String (S) whose value is JSON
+   text; this tool accepts either (confirmed against real production
+   data, which uses the native Map form — see the doc comment on
+   `extractX3DConfigURL` in `fetch.go`).
 3. Downloads that URL into `input_dir`.
 4. Parses the downloaded model's own `<ImageTexture url="...">`
    reference and downloads that too (resolved relative to the model's
@@ -130,7 +134,7 @@ comments — copy it to `config.yaml` (or any path) and edit.
 | `partition_key_attr` | no | `id` | DynamoDB attribute used as the `get_item` key. |
 | `identifier_attr` | no | `identifier` | DynamoDB attribute matched against in `scan` mode. |
 | `identifier_prefix` | no | — | Prepended to each identifier before lookup (e.g. `"ark:/53696/"`). |
-| `archive_options_field` | no | `archiveOptions` | DynamoDB attribute holding the model config as JSON text. |
+| `archive_options_field` | no | `archiveOptions` | DynamoDB attribute (AWSJSON: a Map, or a String holding JSON text) holding the model config. |
 | `degrees` | no | `0` | Rotation angle in degrees. Sign controls direction. |
 | `axis` | no | `1 0 0` | X3D `SFVec3f` rotation axis. |
 | `render` | no | `false` | Whether to rotate/render thumbnails at all. |

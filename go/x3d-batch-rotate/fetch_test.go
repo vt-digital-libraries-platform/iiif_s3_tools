@@ -203,7 +203,7 @@ func TestFetchDDBItem_InvalidLookupMode(t *testing.T) {
 	}
 }
 
-func TestExtractX3DConfigURL(t *testing.T) {
+func TestExtractX3DConfigURL_StringJSON(t *testing.T) {
 	item := map[string]types.AttributeValue{
 		"archiveOptions": strAttr(`{"assets":{"x3d_config":"https://cdn.example.com/models/foo.x3d","other":"ignored"}}`),
 	}
@@ -216,6 +216,53 @@ func TestExtractX3DConfigURL(t *testing.T) {
 	}
 }
 
+// TestExtractX3DConfigURL_Map covers the shape actually observed in
+// production: archiveOptions (an AppSync AWSJSON-typed field) stored as a
+// native DynamoDB Map (M) of nested M/L/S/N/BOOL attributes, not as a
+// JSON-encoded String — confirmed by fetching a real item and inspecting
+// its raw attribute type (see fetch.go's extractX3DConfigURL doc comment).
+func TestExtractX3DConfigURL_Map(t *testing.T) {
+	item := map[string]types.AttributeValue{
+		"archiveOptions": &types.AttributeValueMemberM{Value: map[string]types.AttributeValue{
+			"assets": &types.AttributeValueMemberM{Value: map[string]types.AttributeValue{
+				"x3d_config": &types.AttributeValueMemberS{Value: "https://cdn.example.com/models/foo.x3d"},
+				"media_type": &types.AttributeValueMemberS{Value: "3d-model/x3d"},
+			}},
+			"config": &types.AttributeValueMemberM{Value: map[string]types.AttributeValue{
+				"_3d": &types.AttributeValueMemberM{Value: map[string]types.AttributeValue{
+					"scale_factor": &types.AttributeValueMemberS{Value: ""},
+				}},
+			}},
+		}},
+	}
+	url, err := extractX3DConfigURL(item, "archiveOptions")
+	if err != nil {
+		t.Fatalf("extractX3DConfigURL: %v", err)
+	}
+	if url != "https://cdn.example.com/models/foo.x3d" {
+		t.Errorf("got %q", url)
+	}
+}
+
+// TestExtractX3DConfigURL_Map_GLTFOnly mirrors a real record found in the
+// table this tool targets: a glTF-only item (assets.gltf_config present,
+// no assets.x3d_config), stored as a Map. This must produce the
+// "no assets.x3d_config" error, not a type error.
+func TestExtractX3DConfigURL_Map_GLTFOnly(t *testing.T) {
+	item := map[string]types.AttributeValue{
+		"archiveOptions": &types.AttributeValueMemberM{Value: map[string]types.AttributeValue{
+			"assets": &types.AttributeValueMemberM{Value: map[string]types.AttributeValue{
+				"gltf_config": &types.AttributeValueMemberS{Value: "https://cdn.example.com/models/foo.glb"},
+				"media_type":  &types.AttributeValueMemberS{Value: "3d-model/gltf"},
+			}},
+		}},
+	}
+	_, err := extractX3DConfigURL(item, "archiveOptions")
+	if err == nil {
+		t.Fatal("expected error for glTF-only item with no assets.x3d_config, got nil")
+	}
+}
+
 func TestExtractX3DConfigURL_MissingField(t *testing.T) {
 	item := map[string]types.AttributeValue{}
 	if _, err := extractX3DConfigURL(item, "archiveOptions"); err == nil {
@@ -223,12 +270,12 @@ func TestExtractX3DConfigURL_MissingField(t *testing.T) {
 	}
 }
 
-func TestExtractX3DConfigURL_NotAString(t *testing.T) {
+func TestExtractX3DConfigURL_UnsupportedType(t *testing.T) {
 	item := map[string]types.AttributeValue{
 		"archiveOptions": &types.AttributeValueMemberN{Value: "42"},
 	}
 	if _, err := extractX3DConfigURL(item, "archiveOptions"); err == nil {
-		t.Fatal("expected error for non-string attribute, got nil")
+		t.Fatal("expected error for attribute that is neither Map nor String, got nil")
 	}
 }
 

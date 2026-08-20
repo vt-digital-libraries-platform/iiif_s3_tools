@@ -24,9 +24,11 @@ output_dir: /path/to/thumbnails
 # SDK's default credential chain -- environment variables, shared
 # config/credentials file, SSO, instance/task role, etc.; there is no
 # credential configuration here), reads its "archiveOptions" attribute
-# (a JSON string; AppSync AWSJSON fields are stored this way), and
-# downloads the model at archiveOptions.assets.x3d_config plus its
-# texture (found by parsing the downloaded model's own
+# (an AppSync AWSJSON-typed field -- stored in DynamoDB either as a
+# native Map of nested attributes or as a String holding JSON text; both
+# are accepted), and downloads the model at
+# archiveOptions.assets.x3d_config plus its texture (found by parsing
+# the downloaded model's own
 # <ImageTexture url="..."> reference, so the texture filename never needs
 # to be guessed or hardcoded) into input_dir. Each identifier's own value
 # (not the model's filename) is used to name its thumbnail:

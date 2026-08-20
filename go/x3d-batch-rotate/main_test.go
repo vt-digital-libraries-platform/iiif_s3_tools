@@ -129,7 +129,7 @@ func TestIsRelativeAssetURL(t *testing.T) {
 
 func TestFindModels(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"a.x3d", "b.X3D", "rotated_a.x3d", "notes.txt"} {
+	for _, name := range []string{"a.x3d", "b.X3D", "notes.txt"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -138,7 +138,7 @@ func TestFindModels(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := findModels(dir, "rotated_")
+	got, err := findModels(dir)
 	if err != nil {
 		t.Fatalf("findModels: %v", err)
 	}
@@ -153,39 +153,28 @@ func TestFindModels(t *testing.T) {
 	}
 }
 
-func TestCopyFile(t *testing.T) {
+func TestLocalJobs(t *testing.T) {
 	dir := t.TempDir()
-	src := filepath.Join(dir, "src.txt")
-	if err := os.WriteFile(src, []byte("hello"), 0o644); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"LowRes_VTEC1.x3d", "other.x3d"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	dst := filepath.Join(dir, "nested", "dst.txt")
-	if err := copyFile(src, dst); err != nil {
-		t.Fatalf("copyFile: %v", err)
-	}
-	got, err := os.ReadFile(dst)
+	jobs, err := localJobs(dir)
 	if err != nil {
-		t.Fatalf("reading copied file: %v", err)
+		t.Fatalf("localJobs: %v", err)
 	}
-	if string(got) != "hello" {
-		t.Errorf("got %q, want %q", got, "hello")
+	want := []job{
+		{identifier: "LowRes_VTEC1", modelName: "LowRes_VTEC1.x3d"},
+		{identifier: "other", modelName: "other.x3d"},
 	}
-
-	// Existing destination is left untouched (no-op), even if src changes.
-	if err := os.WriteFile(src, []byte("changed"), 0o644); err != nil {
-		t.Fatal(err)
+	if len(jobs) != len(want) {
+		t.Fatalf("got %v, want %v", jobs, want)
 	}
-	if err := copyFile(src, dst); err != nil {
-		t.Fatalf("copyFile (no-op case): %v", err)
-	}
-	got, _ = os.ReadFile(dst)
-	if string(got) != "hello" {
-		t.Errorf("expected existing destination to be left alone, got %q", got)
-	}
-
-	// Same src/dst path is a no-op, not an error.
-	if err := copyFile(src, src); err != nil {
-		t.Errorf("copyFile(src, src) should be a no-op, got error: %v", err)
+	for i := range want {
+		if jobs[i] != want[i] {
+			t.Errorf("jobs[%d] = %+v, want %+v", i, jobs[i], want[i])
+		}
 	}
 }

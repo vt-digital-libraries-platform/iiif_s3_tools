@@ -6,13 +6,16 @@
 # this directory are considered, not subdirectories). If identifiers_file
 # (below) is set, models are downloaded into this directory before it's
 # scanned, so it does not need to pre-exist or already contain anything.
+# Used only as working/scratch space -- see output_dir below for where the
+# actual result (the thumbnail) ends up.
 input_dir: /path/to/models
 
-# Directory rotated .x3d files and rendered PNGs are written to. Defaults
-# to input_dir if omitted, which is the simplest setup: everything (model,
-# texture, rotated model, renders) lives side by side, exactly like the
-# original archive asset layout.
-output_dir: /path/to/models
+# Directory each model's thumbnail PNG is written to. This is the ONLY
+# thing the tool writes to output_dir: no rotated .x3d file and no
+# unrotated ("initial") render are ever written anywhere -- the rotation
+# is applied to the model in memory purely to produce the thumbnail.
+# Defaults to input_dir if omitted.
+output_dir: /path/to/thumbnails
 
 # --- Fetch phase (optional) ---
 # When identifiers_file is set, the tool first reads a JSON array of
@@ -22,14 +25,18 @@ output_dir: /path/to/models
 # config/credentials file, SSO, instance/task role, etc.; there is no
 # credential configuration here), reads its "archiveOptions" attribute
 # (a JSON string; AppSync AWSJSON fields are stored this way), and
-# downloads the model at
-# archiveOptions.assets.x3d_config plus its texture (found by parsing the
-# downloaded model's own <ImageTexture url="..."> reference, so the
-# texture filename never needs to be guessed or hardcoded) into input_dir.
-# A failure for one identifier is logged and does not stop the others --
-# the rotate/render phase below then simply runs over whatever .x3d files
-# actually made it into input_dir. Leave unset (the default) to skip this
-# phase entirely and just process .x3d files already sitting in input_dir.
+# downloads the model at archiveOptions.assets.x3d_config plus its
+# texture (found by parsing the downloaded model's own
+# <ImageTexture url="..."> reference, so the texture filename never needs
+# to be guessed or hardcoded) into input_dir. Each identifier's own value
+# (not the model's filename) is used to name its thumbnail:
+# <identifier>_thumbnail.png. A failure for one identifier is logged and
+# does not stop the others -- the render phase below then simply runs
+# over whatever models were actually fetched.
+#
+# Leave unset (the default) to skip this phase entirely and just process
+# .x3d files already sitting in input_dir; in that case each file's own
+# basename (without extension) is used as its "identifier" for naming.
 identifiers_file: ""
 
 # AWS region and DynamoDB table the fetch phase looks identifiers up in.
@@ -67,27 +74,27 @@ identifier_prefix: ""
 # download URL is read from this JSON at assets.x3d_config.
 archive_options_field: archiveOptions
 
-# Rotation applied to a copy of each model. Positive/negative sign controls
-# direction; axis is an X3D SFVec3f string. "1 0 0" with a negative angle
-# reproduces "drag up" in an examine-mode X3D viewer (tips the top/dorsal
-# side of the model toward the camera).
+# Rotation applied to a copy of each model, in memory, before rendering
+# its thumbnail. Positive/negative sign controls direction; axis is an
+# X3D SFVec3f string. "1 0 0" with a negative angle reproduces "drag up"
+# in an examine-mode X3D viewer (tips the top/dorsal side of the model
+# toward the camera).
 degrees: -75
 axis: "1 0 0"
 
-# Prefix used for the rotated output file: rotated_<original-filename>.
-rotated_prefix: "rotated_"
-
-# Whether to render PNG snapshots at all. If false, only the rotated .x3d
-# files are written and everything below this point is ignored.
+# Whether to render thumbnails at all. If false, the tool only runs the
+# fetch phase (if identifiers_file is set) and does nothing else -- no
+# rotation, no rendering, no output files.
 render: true
 
-# If true, skip rendering the "_initial" (unrotated) PNG and only render
-# the "_rotated" one. Useful when you already have initial renders from a
-# previous run and only changed the rotation angle.
-skip_initial_render: false
-
-# Width/height in pixels of the rendered square PNG.
-image_size: 1000
+# Width and height, in pixels, of the square thumbnail PNG. If the
+# rendered canvas isn't already exactly this size and square (it always
+# should be, but this is a safety net against e.g. unexpected browser
+# DPI scaling), it's first centered on a white square background sized to
+# its longer side -- no cropping, no stretching -- and that square is then
+# scaled to this size. The source pixels themselves are never otherwise
+# altered.
+thumbnail_size: 250
 
 # Extra seconds to wait after the model's geometry is confirmed loaded,
 # to give its texture image time to finish decoding and draw.
@@ -101,12 +108,12 @@ render_timeout_seconds: 60
 x3dom_js_url: "https://img.cloud.lib.vt.edu/scripts/x3dom_1.8.4-dev.js"
 x3dom_css_url: "https://img.cloud.lib.vt.edu/scripts/x3dom.css"
 
-# Filename suffixes for the rendered PNGs, appended to each model's
-# filename stem (e.g. "LowRes_VTEC000000374_X3D" + initial_suffix).
-initial_suffix: "_initial.PNG"
-rotated_suffix: "_rotated.PNG"
+# Filename suffix for the thumbnail PNG, appended to each model's
+# identifier (e.g. "368a8114" + thumbnail_suffix -> "368a8114_thumbnail.png").
+thumbnail_suffix: "_thumbnail.png"
 
-# When true, log what would happen (files to write, images to render)
-# without writing or rendering anything. Can also be forced on with the
-# -dry-run CLI flag regardless of what is set here.
+# When true, log what would happen (which models would be rotated and
+# rendered, and to what output path) without writing or rendering
+# anything. Can also be forced on with the -dry-run CLI flag regardless
+# of what is set here.
 dry_run: false

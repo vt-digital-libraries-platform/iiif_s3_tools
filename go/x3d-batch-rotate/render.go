@@ -97,7 +97,7 @@ func (f *fileServer) handleRenderPage(cfg *Config, modelRelPath string) (string,
 	data := renderPageData{
 		X3domJSURL:  cfg.X3domJSURL,
 		X3domCSSURL: cfg.X3domCSSURL,
-		Size:        cfg.ImageSize,
+		Size:        cfg.ThumbnailSize,
 		ModelURL:    modelRelPath,
 	}
 
@@ -160,8 +160,8 @@ const sceneReadyExpr = `(() => {
 })()`
 
 // renderModelPNG renders modelRelPath (a path relative to srv's root,
-// e.g. "rotated_foo.x3d") to a PNG screenshot of exactly the X3D canvas
-// element, at cfg.ImageSize x cfg.ImageSize pixels.
+// e.g. ".tmp_rotated_foo.x3d") to a PNG screenshot of exactly the X3D
+// canvas element, at cfg.ThumbnailSize x cfg.ThumbnailSize pixels.
 //
 // allocCtx must be an allocator context from newBrowserAllocator, not a
 // tab context: a fresh tab (chromedp.NewContext) is opened per call and
@@ -189,13 +189,13 @@ func renderModelPNG(allocCtx context.Context, srv *fileServer, cfg *Config, mode
 	// indefinitely against x3dom's WebGL canvas (observed: navigate and
 	// poll both complete in ~1s, then the screenshot action never
 	// returns). Since the render page has no margin/padding and the x3d
-	// element is sized to exactly cfg.ImageSize, a full-viewport
+	// element is sized to exactly cfg.ThumbnailSize, a full-viewport
 	// screenshot at that same size is pixel-identical to a crop of the
 	// canvas and avoids the hang entirely.
 	var buf []byte
 	var ready bool
 	err = chromedp.Run(runCtx,
-		chromedp.EmulateViewport(int64(cfg.ImageSize), int64(cfg.ImageSize)),
+		chromedp.EmulateViewport(int64(cfg.ThumbnailSize), int64(cfg.ThumbnailSize)),
 		chromedp.Navigate(pageURL),
 		chromedp.Poll(sceneReadyExpr, &ready, chromedp.WithPollingTimeout(time.Duration(cfg.RenderTimeoutSeconds)*time.Second)),
 		chromedp.Sleep(time.Duration(cfg.RenderWaitSeconds)*time.Second),

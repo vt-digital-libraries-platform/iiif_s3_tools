@@ -1,16 +1,16 @@
-// Command x3d-batch-rotate takes a directory of X3D models, writes a
-// rotated copy of each one (the whole scene wrapped in a single new
-// <Transform rotation="..."> node), and — unless rendering is disabled —
-// uses headless Chrome (via chromedp) to render an "initial" PNG snapshot
-// of each original model and a "rotated" PNG snapshot of each rotated
-// model, the same way an X3D viewer in a browser would show them.
+// Command x3d-batch-rotate takes a directory of X3D models (or downloads
+// them from DynamoDB by identifier — see fetch.go) and, for each one,
+// renders a 250x250 PNG thumbnail of the model rotated by a configured
+// angle, using headless Chrome to run the same X3DOM viewer the DLP
+// archive site uses. The rotation is applied in memory purely to produce
+// the thumbnail; no rotated .x3d file or unrotated ("initial") render is
+// written anywhere.
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -27,7 +27,9 @@ type Config struct {
 
 	// Identifier-driven fetch phase: when IdentifiersFile is set, models
 	// are downloaded into InputDir from DynamoDB/S3-or-CloudFront before
-	// the usual rotate/render phase runs over InputDir. See fetch.go.
+	// the usual rotate/render phase runs, and each identifier (not the
+	// model's own filename) is used to name that model's thumbnail. See
+	// fetch.go.
 	IdentifiersFile     string `yaml:"identifiers_file"`
 	Region              string `yaml:"region"`
 	TableName           string `yaml:"table_name"`
@@ -37,21 +39,18 @@ type Config struct {
 	IdentifierPrefix    string `yaml:"identifier_prefix"`
 	ArchiveOptionsField string `yaml:"archive_options_field"`
 
-	Degrees       float64 `yaml:"degrees"`
-	Axis          string  `yaml:"axis"`
-	RotatedPrefix string  `yaml:"rotated_prefix"`
+	Degrees float64 `yaml:"degrees"`
+	Axis    string  `yaml:"axis"`
 
 	Render               bool `yaml:"render"`
-	SkipInitialRender    bool `yaml:"skip_initial_render"`
-	ImageSize            int  `yaml:"image_size"`
+	ThumbnailSize        int  `yaml:"thumbnail_size"`
 	RenderWaitSeconds    int  `yaml:"render_wait_seconds"`
 	RenderTimeoutSeconds int  `yaml:"render_timeout_seconds"`
 
 	X3domJSURL  string `yaml:"x3dom_js_url"`
 	X3domCSSURL string `yaml:"x3dom_css_url"`
 
-	InitialSuffix string `yaml:"initial_suffix"`
-	RotatedSuffix string `yaml:"rotated_suffix"`
+	ThumbnailSuffix string `yaml:"thumbnail_suffix"`
 
 	DryRun bool `yaml:"dry_run"`
 }
@@ -73,11 +72,8 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.Axis == "" {
 		cfg.Axis = "1 0 0"
 	}
-	if cfg.RotatedPrefix == "" {
-		cfg.RotatedPrefix = "rotated_"
-	}
-	if cfg.ImageSize == 0 {
-		cfg.ImageSize = 1000
+	if cfg.ThumbnailSize == 0 {
+		cfg.ThumbnailSize = 250
 	}
 	if cfg.RenderWaitSeconds == 0 {
 		cfg.RenderWaitSeconds = 4
@@ -91,11 +87,8 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.X3domCSSURL == "" {
 		cfg.X3domCSSURL = "https://img.cloud.lib.vt.edu/scripts/x3dom.css"
 	}
-	if cfg.InitialSuffix == "" {
-		cfg.InitialSuffix = "_initial.PNG"
-	}
-	if cfg.RotatedSuffix == "" {
-		cfg.RotatedSuffix = "_rotated.PNG"
+	if cfg.ThumbnailSuffix == "" {
+		cfg.ThumbnailSuffix = "_thumbnail.png"
 	}
 	if cfg.LookupMode == "" {
 		cfg.LookupMode = "get_item"
@@ -132,10 +125,15 @@ func loadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// findModels returns the .x3d files directly inside dir, sorted, excluding
-// any that already carry the rotated-output prefix (so re-running the tool
-// over its own output directory doesn't try to re-rotate its own results).
-func findModels(dir, rotatedPrefix string) ([]string, error) {
+// job pairs a model file sitting in InputDir with the identifier its
+// thumbnail should be named after.
+type job struct {
+	identifier string
+	modelName  string
+}
+
+// findModels returns the .x3d files directly inside dir, sorted.
+func findModels(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("reading input dir: %w", err)
@@ -150,71 +148,37 @@ func findModels(dir, rotatedPrefix string) ([]string, error) {
 		if !strings.EqualFold(filepath.Ext(name), ".x3d") {
 			continue
 		}
-		if strings.HasPrefix(name, rotatedPrefix) {
-			continue
-		}
 		models = append(models, name)
 	}
 	sort.Strings(models)
 	return models, nil
 }
 
-// copyFile copies src to dst, creating dst's parent directory if needed.
-// It is a no-op if dst already exists (assets are treated as immutable
-// once staged for a batch run).
-func copyFile(src, dst string) error {
-	if src == dst {
-		return nil
-	}
-	if _, err := os.Stat(dst); err == nil {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.CreateTemp(filepath.Dir(dst), ".tmp-copy-*")
-	if err != nil {
-		return err
-	}
-	tmpName := out.Name()
-	defer os.Remove(tmpName)
-
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
-	}
-	if err := out.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, dst)
-}
-
-type result struct {
-	model          string
-	rotated        bool
-	renderedInit   bool
-	renderedRotate bool
-	err            error
-}
-
-func run(cfg *Config) ([]result, error) {
-	models, err := findModels(cfg.InputDir, cfg.RotatedPrefix)
+// localJobs builds jobs from whatever .x3d files are already sitting in
+// input_dir (the no-identifiers_file case), using each file's basename
+// (without extension) as its "identifier" for thumbnail naming.
+func localJobs(inputDir string) ([]job, error) {
+	models, err := findModels(inputDir)
 	if err != nil {
 		return nil, err
 	}
-
-	if cfg.Render && !cfg.DryRun {
-		if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
-			return nil, fmt.Errorf("creating output dir: %w", err)
+	jobs := make([]job, len(models))
+	for i, name := range models {
+		jobs[i] = job{
+			identifier: strings.TrimSuffix(name, filepath.Ext(name)),
+			modelName:  name,
 		}
 	}
+	return jobs, nil
+}
 
+type result struct {
+	job      job
+	rendered bool
+	err      error
+}
+
+func run(cfg *Config, jobs []job) []result {
 	var (
 		results []result
 		alloc   context.Context
@@ -222,11 +186,11 @@ func run(cfg *Config) ([]result, error) {
 		srv     *fileServer
 	)
 
-	if cfg.Render && !cfg.DryRun && len(models) > 0 {
+	if cfg.Render && !cfg.DryRun && len(jobs) > 0 {
 		var err error
-		srv, err = startFileServer(cfg.OutputDir)
+		srv, err = startFileServer(cfg.InputDir)
 		if err != nil {
-			return nil, fmt.Errorf("starting local file server: %w", err)
+			return []result{{err: fmt.Errorf("starting local file server: %w", err)}}
 		}
 		defer srv.Close()
 
@@ -234,102 +198,72 @@ func run(cfg *Config) ([]result, error) {
 		defer cancel()
 	}
 
-	for _, name := range models {
-		res := result{model: name}
-		if err := processModel(cfg, alloc, srv, name, &res); err != nil {
+	for _, j := range jobs {
+		res := result{job: j}
+		if err := processJob(cfg, alloc, srv, j); err != nil {
 			res.err = err
+		} else {
+			res.rendered = cfg.Render && !cfg.DryRun
 		}
 		results = append(results, res)
 	}
 
-	return results, nil
+	return results
 }
 
-func processModel(cfg *Config, browserCtx context.Context, srv *fileServer, name string, res *result) error {
-	stem := strings.TrimSuffix(name, filepath.Ext(name))
-	srcPath := filepath.Join(cfg.InputDir, name)
-	rotatedName := cfg.RotatedPrefix + name
-	rotatedPath := filepath.Join(cfg.OutputDir, rotatedName)
+// processJob rotates j's model in memory, renders a thumbnail of the
+// rotated model, and writes only that thumbnail to disk. The rotated X3D
+// content is written to a scratch file inside input_dir just long enough
+// for the headless browser to load it (relative texture references need
+// a real served file to resolve against), then removed; it is never
+// written to output_dir or left behind in input_dir.
+func processJob(cfg *Config, browserCtx context.Context, srv *fileServer, j job) error {
+	thumbPath := filepath.Join(cfg.OutputDir, j.identifier+cfg.ThumbnailSuffix)
 
+	if !cfg.Render {
+		log.Printf("skipped (render=false): %s", j.identifier)
+		return nil
+	}
+
+	if cfg.DryRun {
+		log.Printf("[dry-run] would rotate %s (%.2f deg about %s) and render %s", j.modelName, cfg.Degrees, cfg.Axis, thumbPath)
+		return nil
+	}
+
+	srcPath := filepath.Join(cfg.InputDir, j.modelName)
 	content, err := os.ReadFile(srcPath)
 	if err != nil {
-		return fmt.Errorf("reading %s: %w", name, err)
+		return fmt.Errorf("reading %s: %w", j.modelName, err)
 	}
 
 	rotatedContent, err := wrapSceneInTransform(string(content), cfg.Axis, cfg.Degrees)
 	if err != nil {
-		return fmt.Errorf("rotating %s: %w", name, err)
+		return fmt.Errorf("rotating %s: %w", j.modelName, err)
 	}
 
-	if cfg.DryRun {
-		log.Printf("[dry-run] would write %s", rotatedPath)
-	} else {
-		if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
-			return fmt.Errorf("creating output dir: %w", err)
-		}
-		if err := os.WriteFile(rotatedPath, []byte(rotatedContent), 0o644); err != nil {
-			return fmt.Errorf("writing %s: %w", rotatedPath, err)
-		}
+	scratchName := ".tmp_rotated_" + j.modelName
+	scratchPath := filepath.Join(cfg.InputDir, scratchName)
+	if err := os.WriteFile(scratchPath, []byte(rotatedContent), 0o644); err != nil {
+		return fmt.Errorf("writing scratch rotated model for %s: %w", j.modelName, err)
 	}
-	res.rotated = true
-	log.Printf("rotated: %s -> %s (%.2f deg about %s)", name, rotatedName, cfg.Degrees, cfg.Axis)
+	defer os.Remove(scratchPath)
 
-	if !cfg.Render {
-		return nil
-	}
-
-	// Make sure the model file(s) and any relatively-referenced textures
-	// they need are all reachable from the directory being served, so
-	// relative <ImageTexture url="..."> references resolve in-browser
-	// regardless of whether output_dir differs from input_dir.
-	for _, tex := range extractTextureURLs(string(content)) {
-		if !isRelativeAssetURL(tex) {
-			continue
-		}
-		if cfg.DryRun {
-			continue
-		}
-		if err := copyFile(filepath.Join(cfg.InputDir, tex), filepath.Join(cfg.OutputDir, tex)); err != nil {
-			return fmt.Errorf("staging texture %s for %s: %w", tex, name, err)
-		}
-	}
-
-	if cfg.DryRun {
-		if !cfg.SkipInitialRender {
-			log.Printf("[dry-run] would render %s", filepath.Join(cfg.OutputDir, stem+cfg.InitialSuffix))
-		}
-		log.Printf("[dry-run] would render %s", filepath.Join(cfg.OutputDir, stem+cfg.RotatedSuffix))
-		return nil
-	}
-
-	if !cfg.SkipInitialRender {
-		// The original model must also be reachable under the served
-		// output directory for its relative texture reference to resolve.
-		if err := copyFile(srcPath, filepath.Join(cfg.OutputDir, name)); err != nil {
-			return fmt.Errorf("staging %s for render: %w", name, err)
-		}
-		initPath := filepath.Join(cfg.OutputDir, stem+cfg.InitialSuffix)
-		png, err := renderModelPNG(browserCtx, srv, cfg, name)
-		if err != nil {
-			return fmt.Errorf("rendering initial view of %s: %w", name, err)
-		}
-		if err := os.WriteFile(initPath, png, 0o644); err != nil {
-			return fmt.Errorf("writing %s: %w", initPath, err)
-		}
-		res.renderedInit = true
-		log.Printf("rendered: %s", initPath)
-	}
-
-	rotPath := filepath.Join(cfg.OutputDir, stem+cfg.RotatedSuffix)
-	png, err := renderModelPNG(browserCtx, srv, cfg, rotatedName)
+	rendered, err := renderModelPNG(browserCtx, srv, cfg, scratchName)
 	if err != nil {
-		return fmt.Errorf("rendering rotated view of %s: %w", name, err)
+		return fmt.Errorf("rendering rotated view of %s: %w", j.modelName, err)
 	}
-	if err := os.WriteFile(rotPath, png, 0o644); err != nil {
-		return fmt.Errorf("writing %s: %w", rotPath, err)
+	png, err := squareThumbnail(rendered, cfg.ThumbnailSize)
+	if err != nil {
+		return fmt.Errorf("preparing thumbnail for %s: %w", j.modelName, err)
 	}
-	res.renderedRotate = true
-	log.Printf("rendered: %s", rotPath)
+
+	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
+		return fmt.Errorf("creating output dir: %w", err)
+	}
+	if err := os.WriteFile(thumbPath, png, 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", thumbPath, err)
+	}
+	log.Printf("rendered: %s", thumbPath)
 
 	return nil
 }
@@ -337,11 +271,11 @@ func processModel(cfg *Config, browserCtx context.Context, srv *fileServer, name
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to YAML config file")
 	dryRun := flag.Bool("dry-run", false, "report planned actions without writing or rendering anything")
-	noRender := flag.Bool("no-render", false, "skip rendering PNGs; only write rotated .x3d files")
+	noRender := flag.Bool("no-render", false, "skip rotating/rendering; only run the fetch phase, if any")
 	inputDir := flag.String("input", "", "override input_dir from the config file")
 	outputDir := flag.String("output", "", "override output_dir from the config file")
 	degrees := flag.Float64("degrees", 0, "override degrees from the config file (0 means: use config value)")
-	identifiersFile := flag.String("identifiers", "", "override identifiers_file from the config file; fetch models from DynamoDB before rotating/rendering")
+	identifiersFile := flag.String("identifiers", "", "override identifiers_file from the config file; fetch models from DynamoDB before rendering")
 	flag.Parse()
 
 	cfg, err := loadConfig(*configPath)
@@ -369,39 +303,37 @@ func main() {
 
 	start := time.Now()
 
+	var jobs []job
 	var fetchedN, fetchFailedN int
 	if cfg.IdentifiersFile != "" {
-		fetchedN, fetchFailedN, err = fetchAll(cfg)
+		jobs, fetchFailedN, err = fetchAll(cfg)
+		if err != nil {
+			log.Fatalf("fatal: %v", err)
+		}
+		fetchedN = len(jobs)
+	} else {
+		jobs, err = localJobs(cfg.InputDir)
 		if err != nil {
 			log.Fatalf("fatal: %v", err)
 		}
 	}
 
-	results, err := run(cfg)
-	if err != nil {
-		log.Fatalf("fatal: %v", err)
-	}
+	results := run(cfg, jobs)
 
-	var rotatedN, initN, rotN, failedN int
+	var renderedN, failedN int
 	for _, r := range results {
 		if r.err != nil {
 			failedN++
-			log.Printf("FAILED: %s: %v", r.model, r.err)
+			log.Printf("FAILED: %s: %v", r.job.identifier, r.err)
 			continue
 		}
-		if r.rotated {
-			rotatedN++
-		}
-		if r.renderedInit {
-			initN++
-		}
-		if r.renderedRotate {
-			rotN++
+		if r.rendered {
+			renderedN++
 		}
 	}
 
-	log.Printf("done: fetched=%d fetch_failed=%d found=%d rotated=%d rendered_initial=%d rendered_rotated=%d failed=%d elapsed=%s",
-		fetchedN, fetchFailedN, len(results), rotatedN, initN, rotN, failedN, time.Since(start).Round(time.Second))
+	log.Printf("done: fetched=%d fetch_failed=%d found=%d rendered=%d failed=%d elapsed=%s",
+		fetchedN, fetchFailedN, len(jobs), renderedN, failedN, time.Since(start).Round(time.Second))
 
 	if failedN > 0 || fetchFailedN > 0 {
 		os.Exit(1)

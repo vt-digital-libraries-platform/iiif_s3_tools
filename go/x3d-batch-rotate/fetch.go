@@ -211,31 +211,32 @@ func fetchModel(ctx context.Context, client ddbAPI, httpClient *http.Client, cfg
 }
 
 // fetchAll downloads a model (and its texture) into cfg.InputDir for every
-// identifier listed in cfg.IdentifiersFile. It is best-effort: a failure
-// for one identifier is logged and does not stop the others, since the
-// rotate/render phase that follows only ever looks at whatever .x3d files
-// actually ended up in InputDir.
-func fetchAll(cfg *Config) (fetched, failed int, err error) {
+// identifier listed in cfg.IdentifiersFile, and returns a job per
+// successfully-fetched model (pairing the identifier with the model's
+// downloaded filename, for the render phase that follows) plus a count of
+// identifiers that failed. It is best-effort: a failure for one identifier
+// is logged and does not stop the others.
+func fetchAll(cfg *Config) (jobs []job, failed int, err error) {
 	ids, err := loadIdentifiers(cfg.IdentifiersFile)
 	if err != nil {
-		return 0, 0, err
+		return nil, 0, err
 	}
 
 	if cfg.DryRun {
 		for _, id := range ids {
 			log.Printf("[dry-run] would fetch identifier %q via DynamoDB (%s) and download its model+texture into %s", id, cfg.LookupMode, cfg.InputDir)
 		}
-		return 0, 0, nil
+		return nil, 0, nil
 	}
 
 	if err := os.MkdirAll(cfg.InputDir, 0o755); err != nil {
-		return 0, 0, fmt.Errorf("creating input dir: %w", err)
+		return nil, 0, fmt.Errorf("creating input dir: %w", err)
 	}
 
 	ctx := context.Background()
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(cfg.Region))
 	if err != nil {
-		return 0, 0, fmt.Errorf("loading AWS config: %w", err)
+		return nil, 0, fmt.Errorf("loading AWS config: %w", err)
 	}
 	client := dynamodb.NewFromConfig(awsCfg)
 
@@ -248,9 +249,9 @@ func fetchAll(cfg *Config) (fetched, failed int, err error) {
 			log.Printf("FAILED to fetch %q: %v", id, err)
 			continue
 		}
-		fetched++
+		jobs = append(jobs, job{identifier: id, modelName: name})
 		log.Printf("fetched: %s -> %s", id, name)
 	}
 
-	return fetched, failed, nil
+	return jobs, failed, nil
 }

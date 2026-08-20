@@ -1,0 +1,57 @@
+# Example configuration for x3d-batch-rotate.
+# Copy this file (e.g. `cp config_example.yaml config.yaml`) and adjust
+# the values below, then run with: x3d-batch-rotate -config config.yaml
+
+# Directory containing the .x3d files to process (only files directly in
+# this directory are considered, not subdirectories).
+input_dir: /path/to/models
+
+# Directory rotated .x3d files and rendered PNGs are written to. Defaults
+# to input_dir if omitted, which is the simplest setup: everything (model,
+# texture, rotated model, renders) lives side by side, exactly like the
+# original archive asset layout.
+output_dir: /path/to/models
+
+# Rotation applied to a copy of each model. Positive/negative sign controls
+# direction; axis is an X3D SFVec3f string. "1 0 0" with a negative angle
+# reproduces "drag up" in an examine-mode X3D viewer (tips the top/dorsal
+# side of the model toward the camera).
+degrees: -75
+axis: "1 0 0"
+
+# Prefix used for the rotated output file: rotated_<original-filename>.
+rotated_prefix: "rotated_"
+
+# Whether to render PNG snapshots at all. If false, only the rotated .x3d
+# files are written and everything below this point is ignored.
+render: true
+
+# If true, skip rendering the "_initial" (unrotated) PNG and only render
+# the "_rotated" one. Useful when you already have initial renders from a
+# previous run and only changed the rotation angle.
+skip_initial_render: false
+
+# Width/height in pixels of the rendered square PNG.
+image_size: 1000
+
+# Extra seconds to wait after the model's geometry is confirmed loaded,
+# to give its texture image time to finish decoding and draw.
+render_wait_seconds: 4
+
+# Max seconds to wait for a model to load before giving up on it.
+render_timeout_seconds: 60
+
+# X3DOM runtime used for rendering. Defaults to the same build the
+# production DLP viewer uses.
+x3dom_js_url: "https://img.cloud.lib.vt.edu/scripts/x3dom_1.8.4-dev.js"
+x3dom_css_url: "https://img.cloud.lib.vt.edu/scripts/x3dom.css"
+
+# Filename suffixes for the rendered PNGs, appended to each model's
+# filename stem (e.g. "LowRes_VTEC000000374_X3D" + initial_suffix).
+initial_suffix: "_initial.PNG"
+rotated_suffix: "_rotated.PNG"
+
+# When true, log what would happen (files to write, images to render)
+# without writing or rendering anything. Can also be forced on with the
+# -dry-run CLI flag regardless of what is set here.
+dry_run: false

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE X3D PUBLIC "ISO//Web3D//DTD X3D 3.1//EN" "http://www.web3d.org/specifications/x3d-3.1.dtd">
+<X3D profile="Immersive" xsd:noNamespaceSchemaLocation="http://www.web3d.org/specifications/x3d-3.1.xsd" xmlns:xsd="http://www.w3.org/2001/XMLSchema-instance" version="3.1">
+  <head>
+    <meta name="title" content="sample.x3d"/>
+  </head>
+  <Scene>
+    <Shape>
+      <Appearance>
+        <Material ambientIntensity="0.2" diffuseColor="1 1 1" specularColor=".1 .1 .1" shininess=".5"/>
+        <ImageTexture url ="sample.png"/>
+      </Appearance>
+      <IndexedFaceSet solid="false" texCoordIndex="0 1 2 -1" coordIndex="0 1 2 -1">
+        <Coordinate point="0 0 0 1 0 0 0 1 0"/>
+        <TextureCoordinate point="0 0 1 0 0 1"/>
+      </IndexedFaceSet>
+    </Shape>
+  </Scene>
+</X3D>

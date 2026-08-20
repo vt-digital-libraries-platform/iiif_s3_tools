@@ -6,3 +6,5 @@ json_files
 batch_task_json_generator/run-task-generator.sh
 go/iiif-infoFile-modifier/config.yaml
 go/ddb-field-updater/config.yaml
+go/x3d-batch-rotate/config.yaml
+go/x3d-batch-rotate/x3d-batch-rotate

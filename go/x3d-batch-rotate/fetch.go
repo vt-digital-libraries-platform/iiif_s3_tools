@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,46 +9,21 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
-// ddbAttr is a DynamoDB low-level (AttributeValue) JSON representation, as
-// produced by `aws dynamodb get-item`/`scan` output — only the subset of
-// types this tool needs to read (String) is modeled.
-type ddbAttr struct {
-	S *string `json:"S,omitempty"`
-}
-
-type ddbItem map[string]ddbAttr
-
-type ddbGetItemOutput struct {
-	Item ddbItem `json:"Item"`
-}
-
-type ddbScanOutput struct {
-	Items []ddbItem `json:"Items"`
-}
-
-// cliRunner runs an external command (normally the "aws" CLI) and returns
-// its stdout. It is a variable, not a hardcoded exec.Command call, so tests
-// can substitute a fake implementation without invoking a real process or
-// needing AWS credentials.
-var cliRunner = func(name string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return nil, fmt.Errorf("%s %s: %s", name, strings.Join(args, " "), msg)
-	}
-	return stdout.Bytes(), nil
+// ddbAPI is the subset of *dynamodb.Client this tool needs. Depending on
+// an interface rather than *dynamodb.Client directly lets tests substitute
+// a fake implementation without real AWS credentials or network access.
+type ddbAPI interface {
+	GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
+	Scan(ctx context.Context, params *dynamodb.ScanInput, optFns ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error)
 }
 
 // loadIdentifiers reads a JSON file containing an array of identifier
@@ -65,65 +40,50 @@ func loadIdentifiers(path string) ([]string, error) {
 	return ids, nil
 }
 
-// fetchDDBItem looks up a single DynamoDB item for identifier, via the AWS
-// CLI, using either a direct GetItem (identifier is the table's partition
-// key value) or a Scan with a filter expression (identifier is the value
-// of some other attribute), per cfg.LookupMode.
-func fetchDDBItem(cfg *Config, identifier string) (ddbItem, error) {
+// fetchDDBItem looks up a single DynamoDB item for identifier, using
+// either a direct GetItem (identifier is the table's partition key value)
+// or a Scan with a filter expression (identifier is the value of some
+// other attribute), per cfg.LookupMode.
+func fetchDDBItem(ctx context.Context, client ddbAPI, cfg *Config, identifier string) (map[string]types.AttributeValue, error) {
 	key := cfg.IdentifierPrefix + identifier
 
 	switch cfg.LookupMode {
 	case "get_item":
-		keyJSON, err := json.Marshal(map[string]ddbAttr{
-			cfg.PartitionKeyAttr: {S: &key},
+		out, err := client.GetItem(ctx, &dynamodb.GetItemInput{
+			TableName: aws.String(cfg.TableName),
+			Key: map[string]types.AttributeValue{
+				cfg.PartitionKeyAttr: &types.AttributeValueMemberS{Value: key},
+			},
 		})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("dynamodb GetItem: %w", err)
 		}
-		out, err := cliRunner("aws", "dynamodb", "get-item",
-			"--table-name", cfg.TableName,
-			"--region", cfg.Region,
-			"--key", string(keyJSON),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("aws dynamodb get-item: %w", err)
-		}
-		var res ddbGetItemOutput
-		if err := json.Unmarshal(out, &res); err != nil {
-			return nil, fmt.Errorf("parsing get-item output: %w", err)
-		}
-		if res.Item == nil {
+		if out.Item == nil {
 			return nil, fmt.Errorf("no item found with %s=%q", cfg.PartitionKeyAttr, key)
 		}
-		return res.Item, nil
+		return out.Item, nil
 
 	case "scan":
-		namesJSON, err := json.Marshal(map[string]string{"#a": cfg.IdentifierAttr})
-		if err != nil {
-			return nil, err
+		input := &dynamodb.ScanInput{
+			TableName:                 aws.String(cfg.TableName),
+			FilterExpression:          aws.String("#a = :v"),
+			ExpressionAttributeNames:  map[string]string{"#a": cfg.IdentifierAttr},
+			ExpressionAttributeValues: map[string]types.AttributeValue{":v": &types.AttributeValueMemberS{Value: key}},
 		}
-		valuesJSON, err := json.Marshal(map[string]ddbAttr{":v": {S: &key}})
-		if err != nil {
-			return nil, err
+		for {
+			out, err := client.Scan(ctx, input)
+			if err != nil {
+				return nil, fmt.Errorf("dynamodb Scan: %w", err)
+			}
+			if len(out.Items) > 0 {
+				return out.Items[0], nil
+			}
+			if out.LastEvaluatedKey == nil {
+				break
+			}
+			input.ExclusiveStartKey = out.LastEvaluatedKey
 		}
-		out, err := cliRunner("aws", "dynamodb", "scan",
-			"--table-name", cfg.TableName,
-			"--region", cfg.Region,
-			"--filter-expression", "#a = :v",
-			"--expression-attribute-names", string(namesJSON),
-			"--expression-attribute-values", string(valuesJSON),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("aws dynamodb scan: %w", err)
-		}
-		var res ddbScanOutput
-		if err := json.Unmarshal(out, &res); err != nil {
-			return nil, fmt.Errorf("parsing scan output: %w", err)
-		}
-		if len(res.Items) == 0 {
-			return nil, fmt.Errorf("no item found with %s=%q", cfg.IdentifierAttr, key)
-		}
-		return res.Items[0], nil
+		return nil, fmt.Errorf("no item found with %s=%q", cfg.IdentifierAttr, key)
 
 	default:
 		return nil, fmt.Errorf("unknown lookup_mode %q (must be \"get_item\" or \"scan\")", cfg.LookupMode)
@@ -133,10 +93,14 @@ func fetchDDBItem(cfg *Config, identifier string) (ddbItem, error) {
 // extractX3DConfigURL parses a DynamoDB item's archiveOptions attribute
 // (itself a JSON string, e.g. an AppSync AWSJSON field) and returns the
 // download URL at assets.x3d_config inside it.
-func extractX3DConfigURL(item ddbItem, archiveOptionsField string) (string, error) {
+func extractX3DConfigURL(item map[string]types.AttributeValue, archiveOptionsField string) (string, error) {
 	attr, ok := item[archiveOptionsField]
-	if !ok || attr.S == nil {
-		return "", fmt.Errorf("item has no string attribute %q", archiveOptionsField)
+	if !ok {
+		return "", fmt.Errorf("item has no attribute %q", archiveOptionsField)
+	}
+	strAttr, ok := attr.(*types.AttributeValueMemberS)
+	if !ok {
+		return "", fmt.Errorf("attribute %q is not a String", archiveOptionsField)
 	}
 
 	var parsed struct {
@@ -144,7 +108,7 @@ func extractX3DConfigURL(item ddbItem, archiveOptionsField string) (string, erro
 			X3DConfig string `json:"x3d_config"`
 		} `json:"assets"`
 	}
-	if err := json.Unmarshal([]byte(*attr.S), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(strAttr.Value), &parsed); err != nil {
 		return "", fmt.Errorf("parsing %s as JSON: %w", archiveOptionsField, err)
 	}
 	if parsed.Assets.X3DConfig == "" {
@@ -208,8 +172,8 @@ func downloadFile(client *http.Client, srcURL, destPath string) error {
 // (and, via the model's own <ImageTexture> reference, its texture URL),
 // and downloads both into cfg.InputDir. It returns the downloaded model's
 // filename (for logging) on success.
-func fetchModel(cfg *Config, httpClient *http.Client, identifier string) (string, error) {
-	item, err := fetchDDBItem(cfg, identifier)
+func fetchModel(ctx context.Context, client ddbAPI, httpClient *http.Client, cfg *Config, identifier string) (string, error) {
+	item, err := fetchDDBItem(ctx, client, cfg, identifier)
 	if err != nil {
 		return "", err
 	}
@@ -268,10 +232,17 @@ func fetchAll(cfg *Config) (fetched, failed int, err error) {
 		return 0, 0, fmt.Errorf("creating input dir: %w", err)
 	}
 
+	ctx := context.Background()
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(cfg.Region))
+	if err != nil {
+		return 0, 0, fmt.Errorf("loading AWS config: %w", err)
+	}
+	client := dynamodb.NewFromConfig(awsCfg)
+
 	httpClient := &http.Client{Timeout: 2 * time.Minute}
 
 	for _, id := range ids {
-		name, err := fetchModel(cfg, httpClient, id)
+		name, err := fetchModel(ctx, client, httpClient, cfg, id)
 		if err != nil {
 			failed++
 			log.Printf("FAILED to fetch %q: %v", id, err)

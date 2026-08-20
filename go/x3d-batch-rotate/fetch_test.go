@@ -1,25 +1,49 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
-func strp(s string) *string { return &s }
+// fakeDDB is a minimal ddbAPI implementation for tests: it never touches
+// AWS, and each method just delegates to a configurable func field.
+type fakeDDB struct {
+	getItem func(ctx context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error)
+	scan    func(ctx context.Context, in *dynamodb.ScanInput) (*dynamodb.ScanOutput, error)
+}
+
+func (f *fakeDDB) GetItem(ctx context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	return f.getItem(ctx, in)
+}
+
+func (f *fakeDDB) Scan(ctx context.Context, in *dynamodb.ScanInput, _ ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error) {
+	return f.scan(ctx, in)
+}
+
+func strAttr(s string) types.AttributeValue { return &types.AttributeValueMemberS{Value: s} }
 
 func TestFetchDDBItem_GetItem(t *testing.T) {
-	origRunner := cliRunner
-	defer func() { cliRunner = origRunner }()
-
-	var gotArgs []string
-	cliRunner = func(name string, args ...string) ([]byte, error) {
-		gotArgs = args
-		return []byte(`{"Item":{"id":{"S":"abc123"},"archiveOptions":{"S":"{\"assets\":{\"x3d_config\":\"https://example.com/model.x3d\"}}"}}}`), nil
+	var gotKey map[string]types.AttributeValue
+	var gotTable string
+	client := &fakeDDB{
+		getItem: func(ctx context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			gotKey = in.Key
+			gotTable = *in.TableName
+			return &dynamodb.GetItemOutput{
+				Item: map[string]types.AttributeValue{
+					"id":             strAttr("abc123"),
+					"archiveOptions": strAttr(`{"assets":{"x3d_config":"https://example.com/model.x3d"}}`),
+				},
+			}, nil
+		},
 	}
 
 	cfg := &Config{
@@ -28,100 +52,160 @@ func TestFetchDDBItem_GetItem(t *testing.T) {
 		TableName:        "my-table",
 		Region:           "us-east-1",
 	}
-	item, err := fetchDDBItem(cfg, "abc123")
+	item, err := fetchDDBItem(context.Background(), client, cfg, "abc123")
 	if err != nil {
 		t.Fatalf("fetchDDBItem: %v", err)
 	}
-	if item["id"].S == nil || *item["id"].S != "abc123" {
+	got, ok := item["id"].(*types.AttributeValueMemberS)
+	if !ok || got.Value != "abc123" {
 		t.Errorf("unexpected id attr: %+v", item["id"])
 	}
-
-	joined := strings.Join(gotArgs, " ")
-	if !strings.Contains(joined, "get-item") {
-		t.Errorf("expected get-item subcommand, got args: %v", gotArgs)
+	if gotTable != "my-table" {
+		t.Errorf("got table %q, want my-table", gotTable)
 	}
-	if !strings.Contains(joined, `"id":{"S":"abc123"}`) {
-		t.Errorf("expected key JSON to reference id=abc123, got args: %v", gotArgs)
+	keyAttr, ok := gotKey["id"].(*types.AttributeValueMemberS)
+	if !ok || keyAttr.Value != "abc123" {
+		t.Errorf("expected GetItem key id=abc123, got: %+v", gotKey)
 	}
 }
 
 func TestFetchDDBItem_GetItem_NotFound(t *testing.T) {
-	origRunner := cliRunner
-	defer func() { cliRunner = origRunner }()
-	cliRunner = func(name string, args ...string) ([]byte, error) {
-		return []byte(`{}`), nil // no "Item" key: not found
+	client := &fakeDDB{
+		getItem: func(ctx context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			return &dynamodb.GetItemOutput{}, nil // no Item: not found
+		},
 	}
-
 	cfg := &Config{LookupMode: "get_item", PartitionKeyAttr: "id"}
-	_, err := fetchDDBItem(cfg, "missing")
-	if err == nil {
+	if _, err := fetchDDBItem(context.Background(), client, cfg, "missing"); err == nil {
 		t.Fatal("expected error for missing item, got nil")
 	}
 }
 
-func TestFetchDDBItem_Scan(t *testing.T) {
-	origRunner := cliRunner
-	defer func() { cliRunner = origRunner }()
-
-	var gotArgs []string
-	cliRunner = func(name string, args ...string) ([]byte, error) {
-		gotArgs = args
-		return []byte(`{"Items":[{"identifier":{"S":"368a8114"},"archiveOptions":{"S":"{}"}}]}`), nil
+func TestFetchDDBItem_GetItem_Error(t *testing.T) {
+	client := &fakeDDB{
+		getItem: func(ctx context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			return nil, fmt.Errorf("boom")
+		},
 	}
+	cfg := &Config{LookupMode: "get_item", PartitionKeyAttr: "id"}
+	if _, err := fetchDDBItem(context.Background(), client, cfg, "x"); err == nil {
+		t.Fatal("expected error to propagate, got nil")
+	}
+}
 
+func TestFetchDDBItem_Scan(t *testing.T) {
+	var gotFilter string
+	client := &fakeDDB{
+		scan: func(ctx context.Context, in *dynamodb.ScanInput) (*dynamodb.ScanOutput, error) {
+			gotFilter = *in.FilterExpression
+			return &dynamodb.ScanOutput{
+				Items: []map[string]types.AttributeValue{
+					{"identifier": strAttr("368a8114"), "archiveOptions": strAttr("{}")},
+				},
+			}, nil
+		},
+	}
 	cfg := &Config{
 		LookupMode:     "scan",
 		IdentifierAttr: "identifier",
 		TableName:      "my-table",
 		Region:         "us-east-1",
 	}
-	item, err := fetchDDBItem(cfg, "368a8114")
+	item, err := fetchDDBItem(context.Background(), client, cfg, "368a8114")
 	if err != nil {
 		t.Fatalf("fetchDDBItem: %v", err)
 	}
-	if item["identifier"].S == nil || *item["identifier"].S != "368a8114" {
+	got, ok := item["identifier"].(*types.AttributeValueMemberS)
+	if !ok || got.Value != "368a8114" {
 		t.Errorf("unexpected identifier attr: %+v", item["identifier"])
 	}
-	joined := strings.Join(gotArgs, " ")
-	if !strings.Contains(joined, "scan") {
-		t.Errorf("expected scan subcommand, got args: %v", gotArgs)
+	if gotFilter != "#a = :v" {
+		t.Errorf("got filter expression %q", gotFilter)
+	}
+}
+
+func TestFetchDDBItem_Scan_PaginatesUntilMatch(t *testing.T) {
+	calls := 0
+	client := &fakeDDB{
+		scan: func(ctx context.Context, in *dynamodb.ScanInput) (*dynamodb.ScanOutput, error) {
+			calls++
+			if calls == 1 {
+				// First page: no match, but more pages exist.
+				return &dynamodb.ScanOutput{
+					Items:            nil,
+					LastEvaluatedKey: map[string]types.AttributeValue{"id": strAttr("page1-end")},
+				}, nil
+			}
+			// Second page: the match. Also verify ExclusiveStartKey was
+			// carried over from the previous page's LastEvaluatedKey.
+			if in.ExclusiveStartKey == nil {
+				t.Errorf("expected ExclusiveStartKey to be set on page 2")
+			}
+			return &dynamodb.ScanOutput{
+				Items: []map[string]types.AttributeValue{
+					{"identifier": strAttr("found-me")},
+				},
+			}, nil
+		},
+	}
+	cfg := &Config{LookupMode: "scan", IdentifierAttr: "identifier"}
+	item, err := fetchDDBItem(context.Background(), client, cfg, "found-me")
+	if err != nil {
+		t.Fatalf("fetchDDBItem: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 Scan calls (pagination), got %d", calls)
+	}
+	got := item["identifier"].(*types.AttributeValueMemberS).Value
+	if got != "found-me" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestFetchDDBItem_Scan_NotFound(t *testing.T) {
+	client := &fakeDDB{
+		scan: func(ctx context.Context, in *dynamodb.ScanInput) (*dynamodb.ScanOutput, error) {
+			return &dynamodb.ScanOutput{Items: nil, LastEvaluatedKey: nil}, nil
+		},
+	}
+	cfg := &Config{LookupMode: "scan", IdentifierAttr: "identifier"}
+	if _, err := fetchDDBItem(context.Background(), client, cfg, "nope"); err == nil {
+		t.Fatal("expected error when scan exhausts all pages with no match, got nil")
 	}
 }
 
 func TestFetchDDBItem_IdentifierPrefix(t *testing.T) {
-	origRunner := cliRunner
-	defer func() { cliRunner = origRunner }()
-
-	var gotArgs []string
-	cliRunner = func(name string, args ...string) ([]byte, error) {
-		gotArgs = args
-		return []byte(`{"Items":[{"custom_key":{"S":"ark:/53696/368a8114"}}]}`), nil
+	var gotValue string
+	client := &fakeDDB{
+		scan: func(ctx context.Context, in *dynamodb.ScanInput) (*dynamodb.ScanOutput, error) {
+			v := in.ExpressionAttributeValues[":v"].(*types.AttributeValueMemberS)
+			gotValue = v.Value
+			return &dynamodb.ScanOutput{Items: []map[string]types.AttributeValue{{"x": strAttr("y")}}}, nil
+		},
 	}
-
 	cfg := &Config{
 		LookupMode:       "scan",
 		IdentifierAttr:   "custom_key",
 		IdentifierPrefix: "ark:/53696/",
 	}
-	if _, err := fetchDDBItem(cfg, "368a8114"); err != nil {
+	if _, err := fetchDDBItem(context.Background(), client, cfg, "368a8114"); err != nil {
 		t.Fatalf("fetchDDBItem: %v", err)
 	}
-	joined := strings.Join(gotArgs, " ")
-	if !strings.Contains(joined, `ark:/53696/368a8114`) {
-		t.Errorf("expected prefixed identifier in args, got: %v", gotArgs)
+	if gotValue != "ark:/53696/368a8114" {
+		t.Errorf("got filter value %q, want prefixed identifier", gotValue)
 	}
 }
 
 func TestFetchDDBItem_InvalidLookupMode(t *testing.T) {
 	cfg := &Config{LookupMode: "bogus"}
-	if _, err := fetchDDBItem(cfg, "x"); err == nil {
+	if _, err := fetchDDBItem(context.Background(), &fakeDDB{}, cfg, "x"); err == nil {
 		t.Fatal("expected error for invalid lookup_mode, got nil")
 	}
 }
 
 func TestExtractX3DConfigURL(t *testing.T) {
-	item := ddbItem{
-		"archiveOptions": ddbAttr{S: strp(`{"assets":{"x3d_config":"https://cdn.example.com/models/foo.x3d","other":"ignored"}}`)},
+	item := map[string]types.AttributeValue{
+		"archiveOptions": strAttr(`{"assets":{"x3d_config":"https://cdn.example.com/models/foo.x3d","other":"ignored"}}`),
 	}
 	url, err := extractX3DConfigURL(item, "archiveOptions")
 	if err != nil {
@@ -133,15 +217,24 @@ func TestExtractX3DConfigURL(t *testing.T) {
 }
 
 func TestExtractX3DConfigURL_MissingField(t *testing.T) {
-	item := ddbItem{}
+	item := map[string]types.AttributeValue{}
 	if _, err := extractX3DConfigURL(item, "archiveOptions"); err == nil {
 		t.Fatal("expected error for missing archiveOptions attribute, got nil")
 	}
 }
 
+func TestExtractX3DConfigURL_NotAString(t *testing.T) {
+	item := map[string]types.AttributeValue{
+		"archiveOptions": &types.AttributeValueMemberN{Value: "42"},
+	}
+	if _, err := extractX3DConfigURL(item, "archiveOptions"); err == nil {
+		t.Fatal("expected error for non-string attribute, got nil")
+	}
+}
+
 func TestExtractX3DConfigURL_MissingX3DConfig(t *testing.T) {
-	item := ddbItem{
-		"archiveOptions": ddbAttr{S: strp(`{"assets":{"env_config":"https://example.com/env.x3d"}}`)},
+	item := map[string]types.AttributeValue{
+		"archiveOptions": strAttr(`{"assets":{"env_config":"https://example.com/env.x3d"}}`),
 	}
 	if _, err := extractX3DConfigURL(item, "archiveOptions"); err == nil {
 		t.Fatal("expected error for missing assets.x3d_config, got nil")
@@ -149,8 +242,8 @@ func TestExtractX3DConfigURL_MissingX3DConfig(t *testing.T) {
 }
 
 func TestExtractX3DConfigURL_InvalidJSON(t *testing.T) {
-	item := ddbItem{
-		"archiveOptions": ddbAttr{S: strp(`not json`)},
+	item := map[string]types.AttributeValue{
+		"archiveOptions": strAttr(`not json`),
 	}
 	if _, err := extractX3DConfigURL(item, "archiveOptions"); err == nil {
 		t.Fatal("expected error for invalid JSON, got nil")
@@ -232,9 +325,6 @@ func TestDownloadFile_NonOKStatus(t *testing.T) {
 }
 
 func TestFetchModel_EndToEnd(t *testing.T) {
-	origRunner := cliRunner
-	defer func() { cliRunner = origRunner }()
-
 	x3dContent := readTestdata(t, "sample.x3d") // references ImageTexture url="sample.png"
 
 	var assetSrv *httptest.Server
@@ -250,10 +340,16 @@ func TestFetchModel_EndToEnd(t *testing.T) {
 	}))
 	defer assetSrv.Close()
 
-	cliRunner = func(name string, args ...string) ([]byte, error) {
-		archiveOptions := fmt.Sprintf(`{"assets":{"x3d_config":%q}}`, assetSrv.URL+"/models/sample.x3d")
-		out := fmt.Sprintf(`{"Item":{"id":{"S":"abc"},"archiveOptions":{"S":%q}}}`, archiveOptions)
-		return []byte(out), nil
+	client := &fakeDDB{
+		getItem: func(ctx context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			archiveOptions := fmt.Sprintf(`{"assets":{"x3d_config":%q}}`, assetSrv.URL+"/models/sample.x3d")
+			return &dynamodb.GetItemOutput{
+				Item: map[string]types.AttributeValue{
+					"id":             strAttr("abc"),
+					"archiveOptions": strAttr(archiveOptions),
+				},
+			}, nil
+		},
 	}
 
 	dir := t.TempDir()
@@ -264,7 +360,7 @@ func TestFetchModel_EndToEnd(t *testing.T) {
 		ArchiveOptionsField: "archiveOptions",
 	}
 
-	name, err := fetchModel(cfg, assetSrv.Client(), "abc")
+	name, err := fetchModel(context.Background(), client, assetSrv.Client(), cfg, "abc")
 	if err != nil {
 		t.Fatalf("fetchModel: %v", err)
 	}

@@ -66,13 +66,15 @@ flat array of identifier strings:
 
 For each identifier, the tool:
 
-1. Looks the item up in DynamoDB via the **AWS CLI** (`aws dynamodb
-   get-item` or `aws dynamodb scan`, per `lookup_mode` — see the table
-   below). This means it needs the `aws` binary on `PATH` and working
-   credentials (`aws configure`, `AWS_PROFILE`, instance role, etc.) —
-   whatever `aws sts get-caller-identity` would need to succeed. The tool
-   does not use the AWS SDK directly and has no credential configuration
-   of its own.
+1. Looks the item up in DynamoDB via the **AWS SDK for Go v2**
+   (`dynamodb.Client.GetItem` or `.Scan`, per `lookup_mode` — see the
+   table below; `scan` paginates through the whole table via
+   `LastEvaluatedKey` until it finds a match or runs out of pages). This
+   uses the SDK's default credential chain — environment variables,
+   `~/.aws/credentials`, SSO, an instance/task role, etc. — whatever `aws
+   sts get-caller-identity` would need to succeed with the AWS CLI, but
+   the CLI itself is not required; there is no credential configuration
+   in `config.yaml`.
 2. Reads the item's `archiveOptions` attribute — a DynamoDB String whose
    *value* is itself JSON text (this is how an AppSync AWSJSON field is
    stored) — and parses out `assets.x3d_config`, the model's download URL.
@@ -93,6 +95,16 @@ cheap and safe.
 Override `identifiers_file` per-invocation with `-identifiers <path>`
 without editing the config file.
 
+### AWS credentials & permissions
+
+The tool uses the AWS SDK's default credential chain (environment
+variables, shared config/credentials file, SSO, instance/task role, etc.)
+— there is no credentials configuration in `config.yaml`. Whatever
+identity runs the tool needs, at minimum, on `table_name`:
+
+- `dynamodb:GetItem`, if `lookup_mode: get_item`
+- `dynamodb:Scan`, if `lookup_mode: scan`
+
 ## Configuration
 
 Config is a YAML file, passed with `-config` (defaults to `config.yaml` in
@@ -105,7 +117,7 @@ comments — copy it to `config.yaml` (or any path) and edit.
 | `input_dir` | yes | — | Directory containing the `.x3d` files to process (and, if `identifiers_file` is set, where fetched models are downloaded to). |
 | `output_dir` | no | `input_dir` | Where rotated `.x3d` files and rendered PNGs go. |
 | `identifiers_file` | no | — | Path to a JSON array of identifier strings; enables the fetch phase. |
-| `region` | if `identifiers_file` set | — | AWS region passed to the `aws` CLI. |
+| `region` | if `identifiers_file` set | — | AWS region for the DynamoDB client. |
 | `table_name` | if `identifiers_file` set | — | DynamoDB table name. |
 | `lookup_mode` | no | `get_item` | `get_item` (identifier is the table's partition key) or `scan` (identifier is some other attribute's value; reads the whole table per lookup). |
 | `partition_key_attr` | no | `id` | DynamoDB attribute used as the `get_item` key. |
@@ -214,11 +226,11 @@ go test ./...     # runs the rotation/text-processing logic against testdata/sam
 `main_test.go` covers `wrapSceneInTransform`, `extractTextureURLs`,
 `isRelativeAssetURL`, `findModels`, and `copyFile` against small fixtures.
 `fetch_test.go` covers the DynamoDB-item and `archiveOptions` JSON parsing,
-URL resolution, and download logic in `fetch.go`; `cliRunner` (the `aws`
-CLI invocation) is a package-level variable specifically so tests can
-substitute a fake implementation, and downloads are tested against a real
-`httptest.Server` rather than mocked. None of this needs network access,
-AWS credentials, or the `aws` binary to run. The rendering path
-(`render.go`) is exercised by manual end-to-end runs rather than the test
-suite, since it requires a real Chrome install and downloads the X3DOM
-runtime from the VT CDN.
+URL resolution, and download logic in `fetch.go`; `ddbAPI` (the subset of
+`*dynamodb.Client` this tool calls — `GetItem` and `Scan`) is a small
+interface specifically so tests can substitute a fake implementation, and
+downloads are tested against a real `httptest.Server` rather than mocked.
+None of this needs network access or AWS credentials to run. The rendering
+path (`render.go`) is exercised by manual end-to-end runs rather than the
+test suite, since it requires a real Chrome install and downloads the
+X3DOM runtime from the VT CDN.

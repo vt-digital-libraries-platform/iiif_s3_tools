@@ -5,18 +5,30 @@ backs each one up in place, then rewrites it to a corrected format.
 
 ## What it does
 
-For a configured bucket and collection prefix, the tool:
+For a configured bucket, collection, and pair of DynamoDB tables, the tool:
 
-1. Lists every `info.json` object at the **default per-item tile layout**:
+1. **Discovers which archives belong to the collection**, via DynamoDB:
+   - Looks up the Collection record in `collection_table` whose `identifier`
+     attribute equals `collection_identifier`, and reads that record's `id`
+     attribute.
+   - Scans `archive_table` for every record whose `parent_collection`
+     attribute equals that `id`, and collects each matching record's
+     `identifier` attribute.
+   - For each archive identifier, lists every `info.json` object at the
+     **default per-archive tile layout**:
 
-   ```
-   <collection_prefix>/<tiles_dir_name>/<item_identifier>-<index>/info.json
-   ```
+     ```
+     <collection_prefix>/<collection_identifier>/<tiles_dir_name>/<archive_identifier>-<index>/info.json
+     ```
 
-   Only objects exactly one directory level below `<collection_prefix>/<tiles_dir_name>/`
-   are considered. Other `info.json` files required elsewhere by the IIIF
-   spec (e.g. presentation manifests) live outside that path, are formatted
-   differently, and are never touched.
+     An archive identifier may have more than one matching `-<index>`
+     subdirectory, or none (e.g. tiles not yet generated). Only objects
+     exactly one directory level below
+     `<collection_prefix>/<collection_identifier>/<tiles_dir_name>/`, under a
+     subdirectory named for an archive identifier found via DynamoDB, are
+     considered. Other `info.json` files required elsewhere by the IIIF
+     spec (e.g. presentation manifests), or belonging to archives not
+     tracked as part of this collection, are never touched.
 
 2. **Backs up** every matched `info.json` first, as a server-side S3 copy
    named `backup_info.json` (configurable) at the same key location. If any
@@ -98,11 +110,14 @@ with comments.
 
 | Key | Required | Default | Description |
 |---|---|---|---|
-| `region` | yes | — | AWS region the bucket lives in. |
+| `region` | yes | — | AWS region the bucket and DynamoDB tables live in. |
 | `bucket` | yes | — | S3 bucket containing the info.json files. |
-| `collection_prefix` | yes | — | Key prefix for the collection (trailing slash optional; added automatically). |
-| `tiles_dir_name` | no | `tiles` | Directory directly under `collection_prefix` holding one subdirectory per item's tiles. |
-| `info_file_name` | no | `info.json` | Filename to look for inside each item's tile directory. |
+| `collection_prefix` | yes | — | Key prefix *above* the collection root (trailing slash optional; added automatically). `collection_identifier` supplies the final path segment. |
+| `collection_table` | yes | — | DynamoDB table holding Collection records; looked up by `identifier` to find the collection's `id`. |
+| `archive_table` | yes | — | DynamoDB table holding Archive records; scanned for `parent_collection` matching the collection's `id` to find archive identifiers. |
+| `collection_identifier` | yes | — | Value matched against `collection_table`'s `identifier` attribute. Also the final path segment of the S3 collection root: `collection_prefix` + `/` + `collection_identifier` + `/`. |
+| `tiles_dir_name` | no | `tiles` | Directory directly under the collection root (`collection_prefix`/`collection_identifier`) holding one subdirectory per archive's tiles. |
+| `info_file_name` | no | `info.json` | Filename to look for inside each archive's tile directory. |
 | `backup_file_name` | no | `backup_info.json` | Filename for the pre-modification backup, written alongside each `info.json`. |
 | `dry_run` | no | `false` | If true, scan and log planned actions but write nothing to S3. |
 
@@ -139,12 +154,16 @@ upload.
 The tool uses the AWS SDK's default credential chain (environment
 variables, shared config/credentials file, SSO, instance/task role, etc.) —
 there is no credentials configuration in `config.yaml`. Whatever identity
-runs the tool needs, at minimum, on the target bucket/prefix:
+runs the tool needs, at minimum:
 
+On the target bucket/prefix:
 - `s3:ListBucket`
 - `s3:GetObject`
 - `s3:PutObject`
 - `s3:CopyObject` (used for the backup step)
+
+On `collection_table` and `archive_table`:
+- `dynamodb:Scan`
 
 ## Development
 

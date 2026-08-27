@@ -8,9 +8,26 @@ region: us-east-1
 # S3 bucket containing the IIIF info.json files.
 bucket: < your bucket name >
 
-# Key prefix for the collection. Should NOT have a leading slash; a trailing
-# slash is optional (one is added automatically if missing).
-collection_prefix: path/to/collection
+# Key prefix ABOVE the collection root. Should NOT have a leading slash; a
+# trailing slash is optional (one is added automatically if missing).
+# collection_identifier below supplies the final path segment, so
+# collection_prefix: path/to and collection_identifier: mycollection
+# together mean the S3 collection root path/to/mycollection/.
+collection_prefix: path/to
+
+# DynamoDB table name holding Collection records. Used to look up the
+# collection's "id" attribute from its "identifier" attribute.
+collection_table: < your Collection table name >
+
+# DynamoDB table name holding Archive records. Used to find every archive
+# whose "parent_collection" attribute matches the collection's "id".
+archive_table: < your Archive table name >
+
+# Value to look up in collection_table's "identifier" attribute to find this
+# collection. Also used as the final path segment of the collection root on
+# S3: the collection root is collection_prefix + "/" + collection_identifier
+# + "/".
+collection_identifier: mycollection
 
 # Name of the info.json file to look for within each item's tile directory.
 info_file_name: info.json
@@ -19,12 +36,15 @@ info_file_name: info.json
 # "directory" (key prefix), before any modification is made.
 backup_file_name: backup_info.json
 
-# Directory name, directly under collection_prefix, holding one subdirectory
-# per item's tiles. Only info.json objects at the default per-item layout
-#   <collection_prefix>/<tiles_dir_name>/<item_identifier>-<index>/info.json
-# are read/written; other info.json files required by the IIIF spec (e.g.
-# presentation manifests) live outside this path, are formatted differently,
-# and must not be touched.
+# Directory name, directly under the collection root
+# (collection_prefix/collection_identifier), holding one subdirectory per
+# archive's tiles. Only info.json objects at the default per-archive layout
+#   <collection_prefix>/<collection_identifier>/<tiles_dir_name>/<archive_identifier>-<index>/info.json
+# are read/written, and only for archive identifiers found via DynamoDB
+# (collection_table/archive_table above) as belonging to this collection;
+# other info.json files required by the IIIF spec (e.g. presentation
+# manifests) live outside this path, are formatted differently, and must not
+# be touched.
 tiles_dir_name: tiles
 
 # When true, the bucket is scanned and planned changes are reported but no

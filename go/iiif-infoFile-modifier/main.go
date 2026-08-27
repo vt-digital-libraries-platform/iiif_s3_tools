@@ -1,9 +1,14 @@
-// Command iiif-infoFile-modifier finds every "info.json" object at the
-// default per-item tile layout under a configured S3 collection prefix
-// (<collection_prefix>/<tiles_dir_name>/<item_identifier>-<index>/info.json),
-// writes a "backup_info.json" copy of it at the same key location, then
-// rewrites the info.json object's JSON content to match a target format and
-// writes it back to its original key.
+// Command iiif-infoFile-modifier finds every "info.json" object belonging to
+// archives in a DynamoDB-tracked collection. It looks up the Collection
+// record (by identifier) in a configured DynamoDB table to get the
+// collection's id, queries the Archive table for every record whose
+// parent_collection matches that id, and for each archive identifier lists
+// the "info.json" object(s) under the collection's default per-item tile
+// layout (<collection_prefix>/<collection_identifier>/<tiles_dir_name>/
+// <archive_identifier>-<index>/info.json). For each one found, it writes a
+// "backup_info.json" copy at the same key location, then rewrites the
+// info.json object's JSON content to match a target format and writes it
+// back to its original key.
 package main
 
 import (
@@ -20,18 +25,23 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Region           string `yaml:"region"`
-	Bucket           string `yaml:"bucket"`
-	CollectionPrefix string `yaml:"collection_prefix"`
-	InfoFileName     string `yaml:"info_file_name"`
-	BackupFileName   string `yaml:"backup_file_name"`
-	TilesDirName     string `yaml:"tiles_dir_name"`
-	DryRun           bool   `yaml:"dry_run"`
+	Region               string `yaml:"region"`
+	Bucket               string `yaml:"bucket"`
+	CollectionPrefix     string `yaml:"collection_prefix"`
+	InfoFileName         string `yaml:"info_file_name"`
+	BackupFileName       string `yaml:"backup_file_name"`
+	TilesDirName         string `yaml:"tiles_dir_name"`
+	CollectionTable      string `yaml:"collection_table"`
+	ArchiveTable         string `yaml:"archive_table"`
+	CollectionIdentifier string `yaml:"collection_identifier"`
+	DryRun               bool   `yaml:"dry_run"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -64,6 +74,15 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.CollectionPrefix == "" {
 		missing = append(missing, "collection_prefix")
+	}
+	if cfg.CollectionTable == "" {
+		missing = append(missing, "collection_table")
+	}
+	if cfg.ArchiveTable == "" {
+		missing = append(missing, "archive_table")
+	}
+	if cfg.CollectionIdentifier == "" {
+		missing = append(missing, "collection_identifier")
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("config file is missing required field(s): %s", strings.Join(missing, ", "))
@@ -167,33 +186,117 @@ func transformInfoJSON(data []byte) ([]byte, error) {
 	return append(newData, '\n'), nil
 }
 
-// findInfoObjects lists every object under tilesPrefix in bucket whose key
-// matches the default per-item layout tilesPrefix + "<item_identifier>-<index>/" +
-// infoFileName, i.e. exactly one directory segment (the item's tile
-// directory) between tilesPrefix and the filename. The IIIF spec places
-// other, differently-formatted info.json files outside of tilesPrefix (e.g.
-// presentation manifests); those are intentionally left alone.
-func findInfoObjects(ctx context.Context, client *s3.Client, bucket, tilesPrefix, infoFileName string) ([]string, error) {
-	var keys []string
+// findCollectionID scans collectionTable for the item whose "identifier"
+// attribute equals collectionIdentifier and returns that item's "id"
+// attribute value. Returns an error if zero or more than one match is
+// found, or if the matching record has no string "id" attribute.
+func findCollectionID(ctx context.Context, client *dynamodb.Client, collectionTable, collectionIdentifier string) (string, error) {
+	var found []map[string]types.AttributeValue
 
-	paginator := s3.NewListObjectsV2Paginator(client, &s3.ListObjectsV2Input{
-		Bucket: aws.String(bucket),
-		Prefix: aws.String(tilesPrefix),
+	paginator := dynamodb.NewScanPaginator(client, &dynamodb.ScanInput{
+		TableName:        aws.String(collectionTable),
+		FilterExpression: aws.String("identifier = :identifier"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":identifier": &types.AttributeValueMemberS{Value: collectionIdentifier},
+		},
 	})
 
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("listing objects under %q: %w", tilesPrefix, err)
+			return "", fmt.Errorf("scanning collection table %q: %w", collectionTable, err)
 		}
-		for _, obj := range page.Contents {
-			key := aws.ToString(obj.Key)
-			rest := strings.TrimPrefix(key, tilesPrefix)
-			segs := strings.Split(rest, "/")
-			if len(segs) != 2 || segs[0] == "" || segs[1] != infoFileName {
+		found = append(found, page.Items...)
+	}
+
+	if len(found) == 0 {
+		return "", fmt.Errorf("no collection found in table %q with identifier %q", collectionTable, collectionIdentifier)
+	}
+	if len(found) > 1 {
+		return "", fmt.Errorf("multiple (%d) collections found in table %q with identifier %q", len(found), collectionTable, collectionIdentifier)
+	}
+
+	idAttr, ok := found[0]["id"].(*types.AttributeValueMemberS)
+	if !ok || idAttr.Value == "" {
+		return "", fmt.Errorf("collection record (identifier=%q) in table %q is missing a string \"id\" field", collectionIdentifier, collectionTable)
+	}
+
+	return idAttr.Value, nil
+}
+
+// findArchiveIdentifiers scans archiveTable for every item whose
+// "parent_collection" attribute equals collectionID and returns the
+// deduplicated set of matching items' "identifier" attribute values. Items
+// missing a valid string "identifier" are skipped with a logged warning
+// rather than aborting the whole run.
+func findArchiveIdentifiers(ctx context.Context, client *dynamodb.Client, archiveTable, collectionID string) ([]string, error) {
+	seen := make(map[string]struct{})
+	var identifiers []string
+
+	paginator := dynamodb.NewScanPaginator(client, &dynamodb.ScanInput{
+		TableName:        aws.String(archiveTable),
+		FilterExpression: aws.String("parent_collection = :parent_collection"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":parent_collection": &types.AttributeValueMemberS{Value: collectionID},
+		},
+	})
+
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("scanning archive table %q: %w", archiveTable, err)
+		}
+		for _, item := range page.Items {
+			idAttr, ok := item["identifier"].(*types.AttributeValueMemberS)
+			if !ok || idAttr.Value == "" {
+				log.Printf("WARNING: archive record in table %q (parent_collection=%q) missing a string \"identifier\" field, skipping", archiveTable, collectionID)
 				continue
 			}
-			keys = append(keys, key)
+			if _, dup := seen[idAttr.Value]; dup {
+				continue
+			}
+			seen[idAttr.Value] = struct{}{}
+			identifiers = append(identifiers, idAttr.Value)
+		}
+	}
+
+	return identifiers, nil
+}
+
+// findInfoObjects lists, for each archive identifier, every object under
+// tilesPrefix in bucket whose key matches the default per-item layout
+// tilesPrefix + "<archive_identifier>-<index>/" + infoFileName, i.e. exactly
+// one directory segment (the archive's tile directory) between tilesPrefix
+// and the filename. Each archive identifier may have more than one matching
+// "-<index>" subdirectory, or none at all (e.g. tiles not yet generated).
+// The IIIF spec places other, differently-formatted info.json files outside
+// of tilesPrefix (e.g. presentation manifests); those are intentionally left
+// alone.
+func findInfoObjects(ctx context.Context, client *s3.Client, bucket, tilesPrefix, infoFileName string, archiveIdentifiers []string) ([]string, error) {
+	var keys []string
+
+	for _, identifier := range archiveIdentifiers {
+		identifierPrefix := tilesPrefix + identifier + "-"
+
+		paginator := s3.NewListObjectsV2Paginator(client, &s3.ListObjectsV2Input{
+			Bucket: aws.String(bucket),
+			Prefix: aws.String(identifierPrefix),
+		})
+
+		for paginator.HasMorePages() {
+			page, err := paginator.NextPage(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("listing objects under %q: %w", identifierPrefix, err)
+			}
+			for _, obj := range page.Contents {
+				key := aws.ToString(obj.Key)
+				rest := strings.TrimPrefix(key, tilesPrefix)
+				segs := strings.Split(rest, "/")
+				if len(segs) != 2 || segs[0] == "" || segs[1] != infoFileName {
+					continue
+				}
+				keys = append(keys, key)
+			}
 		}
 	}
 
@@ -273,21 +376,35 @@ func main() {
 		log.Fatalf("loading AWS config: %v", err)
 	}
 	client := s3.NewFromConfig(awsCfg)
+	ddbClient := dynamodb.NewFromConfig(awsCfg)
 
 	mode := "LIVE (objects will be written)"
 	if dryRun {
 		mode = "DRY RUN (no objects will be written)"
 	}
-	tilesPrefix := cfg.CollectionPrefix + cfg.TilesDirName + "/"
+	collectionRootPrefix := cfg.CollectionPrefix + cfg.CollectionIdentifier + "/"
+	tilesPrefix := collectionRootPrefix + cfg.TilesDirName + "/"
 
 	log.Printf("bucket=%s tiles_prefix=%s info_file_name=%s backup_file_name=%s mode=%s",
 		cfg.Bucket, tilesPrefix, cfg.InfoFileName, cfg.BackupFileName, mode)
 
-	infoKeys, err := findInfoObjects(ctx, client, cfg.Bucket, tilesPrefix, cfg.InfoFileName)
+	collectionID, err := findCollectionID(ctx, ddbClient, cfg.CollectionTable, cfg.CollectionIdentifier)
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
-	log.Printf("found %d %s object(s) under %s<item_identifier>-<index>/", len(infoKeys), cfg.InfoFileName, tilesPrefix)
+	log.Printf("found collection id=%s for collection_identifier=%s in table %s", collectionID, cfg.CollectionIdentifier, cfg.CollectionTable)
+
+	archiveIdentifiers, err := findArchiveIdentifiers(ctx, ddbClient, cfg.ArchiveTable, collectionID)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	log.Printf("found %d archive identifier(s) in table %s for collection id=%s", len(archiveIdentifiers), cfg.ArchiveTable, collectionID)
+
+	infoKeys, err := findInfoObjects(ctx, client, cfg.Bucket, tilesPrefix, cfg.InfoFileName, archiveIdentifiers)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	log.Printf("found %d %s object(s) under %s<archive_identifier>-<index>/", len(infoKeys), cfg.InfoFileName, tilesPrefix)
 
 	var backedUp, modified, failed int
 

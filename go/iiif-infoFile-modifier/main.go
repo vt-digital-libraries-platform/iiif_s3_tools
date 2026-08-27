@@ -2,7 +2,7 @@
 // archives in a DynamoDB-tracked collection. It looks up the Collection
 // record (by identifier) in a configured DynamoDB table to get the
 // collection's id, queries the Archive table for every record whose
-// parent_collection matches that id, and for each archive identifier lists
+// collection matches that id, and for each archive identifier lists
 // the "info.json" object(s) under the collection's default per-item tile
 // layout (<collection_prefix>/<collection_identifier>/<tiles_dir_name>/
 // <archive_identifier>-<index>/info.json). For each one found, it writes a
@@ -225,19 +225,22 @@ func findCollectionID(ctx context.Context, client *dynamodb.Client, collectionTa
 }
 
 // findArchiveIdentifiers scans archiveTable for every item whose
-// "parent_collection" attribute equals collectionID and returns the
-// deduplicated set of matching items' "identifier" attribute values. Items
-// missing a valid string "identifier" are skipped with a logged warning
-// rather than aborting the whole run.
+// "collection" attribute equals collectionID and returns the deduplicated
+// set of matching items' "identifier" attribute values. Items missing a
+// valid string "identifier" are skipped with a logged warning rather than
+// aborting the whole run.
 func findArchiveIdentifiers(ctx context.Context, client *dynamodb.Client, archiveTable, collectionID string) ([]string, error) {
 	seen := make(map[string]struct{})
 	var identifiers []string
 
 	paginator := dynamodb.NewScanPaginator(client, &dynamodb.ScanInput{
 		TableName:        aws.String(archiveTable),
-		FilterExpression: aws.String("parent_collection = :parent_collection"),
+		FilterExpression: aws.String("#collection = :collection"),
+		ExpressionAttributeNames: map[string]string{
+			"#collection": "collection",
+		},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":parent_collection": &types.AttributeValueMemberS{Value: collectionID},
+			":collection": &types.AttributeValueMemberS{Value: collectionID},
 		},
 	})
 
@@ -249,7 +252,7 @@ func findArchiveIdentifiers(ctx context.Context, client *dynamodb.Client, archiv
 		for _, item := range page.Items {
 			idAttr, ok := item["identifier"].(*types.AttributeValueMemberS)
 			if !ok || idAttr.Value == "" {
-				log.Printf("WARNING: archive record in table %q (parent_collection=%q) missing a string \"identifier\" field, skipping", archiveTable, collectionID)
+				log.Printf("WARNING: archive record in table %q (collection=%q) missing a string \"identifier\" field, skipping", archiveTable, collectionID)
 				continue
 			}
 			if _, dup := seen[idAttr.Value]; dup {

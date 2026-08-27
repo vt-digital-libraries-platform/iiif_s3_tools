@@ -11,7 +11,7 @@ For a configured bucket, collection, and pair of DynamoDB tables, the tool:
    - Looks up the Collection record in `collection_table` whose `identifier`
      attribute equals `collection_identifier`, and reads that record's `id`
      attribute.
-   - Scans `archive_table` for every record whose `parent_collection`
+   - Scans `archive_table` for every record whose `collection`
      attribute equals that `id`, and collects each matching record's
      `identifier` attribute.
    - For each archive identifier, lists every `info.json` object at the
@@ -114,7 +114,7 @@ with comments.
 | `bucket` | yes | — | S3 bucket containing the info.json files. |
 | `collection_prefix` | yes | — | Key prefix *above* the collection root (trailing slash optional; added automatically). `collection_identifier` supplies the final path segment. |
 | `collection_table` | yes | — | DynamoDB table holding Collection records; looked up by `identifier` to find the collection's `id`. |
-| `archive_table` | yes | — | DynamoDB table holding Archive records; scanned for `parent_collection` matching the collection's `id` to find archive identifiers. |
+| `archive_table` | yes | — | DynamoDB table holding Archive records; scanned for `collection` matching the collection's `id` to find archive identifiers. |
 | `collection_identifier` | yes | — | Value matched against `collection_table`'s `identifier` attribute. Also the final path segment of the S3 collection root: `collection_prefix` + `/` + `collection_identifier` + `/`. |
 | `tiles_dir_name` | no | `tiles` | Directory directly under the collection root (`collection_prefix`/`collection_identifier`) holding one subdirectory per archive's tiles. |
 | `info_file_name` | no | `info.json` | Filename to look for inside each archive's tile directory. |

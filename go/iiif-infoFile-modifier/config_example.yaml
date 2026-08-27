@@ -20,7 +20,7 @@ collection_prefix: path/to
 collection_table: < your Collection table name >
 
 # DynamoDB table name holding Archive records. Used to find every archive
-# whose "parent_collection" attribute matches the collection's "id".
+# whose "collection" attribute matches the collection's "id".
 archive_table: < your Archive table name >
 
 # Value to look up in collection_table's "identifier" attribute to find this

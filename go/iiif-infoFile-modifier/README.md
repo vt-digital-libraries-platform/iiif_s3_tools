@@ -1,7 +1,8 @@
 # iiif-infoFile-modifier
 
 Finds IIIF Image API `info.json` tile-metadata files in an S3 collection,
-backs each one up in place, then rewrites it to a corrected format.
+backs each one up in place, then rewrites it to a corrected format — or, in
+[rollback](#rollback) mode, reverses that and removes the backup.
 
 ## What it does
 
@@ -30,15 +31,27 @@ For a configured bucket, collection, and pair of DynamoDB tables, the tool:
      spec (e.g. presentation manifests), or belonging to archives not
      tracked as part of this collection, are never touched.
 
-2. **Backs up** every matched `info.json` first, as a server-side S3 copy
-   named `backup_info.json` (configurable) at the same key location. If any
-   backup fails, the run aborts before modifying anything.
+2. **Skips anything already in the corrected format.** Each matched
+   `info.json` is downloaded and checked (`isAlreadyTransformed`): if its
+   `profile` already declares `formats`/`qualities` — the shape only this
+   tool's own output ever has — it's left alone entirely, with no backup
+   and no rewrite. This makes it safe to run the tool again over a
+   collection it already processed: without this check, a second run would
+   back up the already-corrected file over the real original, permanently
+   losing data (like `sizes`) that only the true original had.
 
-3. **Rewrites** each `info.json` in place (same bucket, same key) to the
-   corrected format — see [Transform](#transform) below.
+3. **Backs up** every remaining (still-original-format) `info.json`, as a
+   server-side S3 copy named `backup_info.json` (configurable) at the same
+   key location. If any backup fails, the run aborts before modifying
+   anything.
+
+4. **Rewrites** each backed-up `info.json` in place (same bucket, same key)
+   to the corrected format — see [Transform](#transform) below.
 
 Run with `-dry-run` (or `dry_run: true` in the config) to see exactly what
 would be backed up and rewritten without touching S3.
+
+Run with `-rollback` to reverse this instead — see [Rollback](#rollback).
 
 ## Transform
 
@@ -102,6 +115,35 @@ If you need to change the target values (e.g. a different tiler that emits
 PNG, or additional `supports` features), edit the `requiredContext`,
 `requiredProtocol`, and `requiredProfile` values at the top of `main.go`.
 
+## Rollback
+
+Run with `-rollback` to reverse the transform for every discovered
+`info.json`: convert it from the corrected/output format back to the
+original pre-transform ("input") format, write that back to the same key,
+then delete that key's `backup_info.json`.
+
+Discovery works exactly the same as a normal run (DynamoDB Collection →
+Archive → S3 key list) — rollback just uses a different per-key action.
+Because the forward transform drops the `sizes` array (it isn't derivable
+from anything left in the corrected format), rollback recovers it from the
+`backup_info.json` written alongside the original transform, rather than
+inventing it. **A `backup_info.json` must exist for every key being rolled
+back** — if one is missing, that key fails and is counted in the summary's
+`failed` total; no backups are deleted for keys that fail.
+
+```sh
+# Dry run first:
+./iiif-infoFile-modifier -config config.yaml -rollback -dry-run
+
+# Live rollback:
+./iiif-infoFile-modifier -config config.yaml -rollback
+```
+
+See `rollbackInfoJSON` in [`main.go`](main.go). `TestRollbackInfoJSON_ReversesTransform`
+in [`main_test.go`](main_test.go) verifies that transforming
+`incorrect_info.json` and then rolling it back (using the original file as
+its own "backup") reproduces `incorrect_info.json` exactly.
+
 ## Configuration
 
 Config is a YAML file, passed with `-config` (defaults to `config.yaml` in
@@ -139,15 +181,22 @@ Flags:
 - `-dry-run` — force dry-run mode even if `dry_run: false` in the config.
   (`dry_run: true` in the config cannot be overridden back to live via
   flags — edit the file instead.)
+- `-rollback` — reverse mode; see [Rollback](#rollback).
 
-The process logs a summary line at the end:
+The process logs a summary line at the end. Normal mode:
 
 ```
-done: found=42 backed_up=42 modified=42 failed=0
+done: found=42 skipped=0 backed_up=42 modified=42 failed=0
 ```
 
-and exits non-zero if any object failed to back up, download, transform, or
-upload.
+Rollback mode:
+
+```
+done: found=42 rolled_back=42 failed=0
+```
+
+and exits non-zero if any object failed to back up/download/transform/upload
+(normal mode) or download/rollback/upload/delete (rollback mode).
 
 ## AWS credentials & permissions
 
@@ -161,6 +210,7 @@ On the target bucket/prefix:
 - `s3:GetObject`
 - `s3:PutObject`
 - `s3:CopyObject` (used for the backup step)
+- `s3:DeleteObject` (used to remove `backup_info.json` during `-rollback`)
 
 On `collection_table` and `archive_table`:
 - `dynamodb:Scan`
@@ -175,5 +225,7 @@ go test ./...     # runs the transform against incorrect_info.json / corrected_i
 ```
 
 `main_test.go` verifies the transform against the two fixture files in this
-directory and checks idempotency; there's no S3 interaction in the test
-suite, so no AWS credentials are needed to run it.
+directory, checks idempotency, checks that rollback reverses the transform,
+and checks `isAlreadyTransformed` correctly distinguishes the two fixtures;
+there's no S3/DynamoDB interaction in the test suite, so no AWS credentials
+are needed to run it.

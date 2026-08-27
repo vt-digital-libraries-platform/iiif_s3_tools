@@ -9,6 +9,11 @@
 // "backup_info.json" copy at the same key location, then rewrites the
 // info.json object's JSON content to match a target format and writes it
 // back to its original key.
+//
+// Run with -rollback to reverse that: each discovered info.json (assumed to
+// already be in the corrected/output format) is converted back to the
+// original pre-transform ("input") format and written back to its key, and
+// the corresponding backup_info.json is then deleted.
 package main
 
 import (
@@ -182,6 +187,128 @@ func transformInfoJSON(data []byte) ([]byte, error) {
 	newData, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("re-marshaling info.json: %w", err)
+	}
+	return append(newData, '\n'), nil
+}
+
+// isAlreadyTransformed reports whether data's info.json content already
+// matches the corrected/output format, so callers can avoid re-backing-up
+// and re-transforming it: specifically, whether its profile's second
+// (feature) element declares a "formats" key, which requiredProfile always
+// adds and the original pre-transform format never has. Running the tool
+// twice against the same collection without this check would back up an
+// already-corrected file over top of the real original, destroying data
+// (e.g. the "sizes" array) that can't be recovered afterward.
+func isAlreadyTransformed(data []byte) (bool, error) {
+	var probe struct {
+		Profile []json.RawMessage `json:"profile"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return false, fmt.Errorf("parsing info.json: %w", err)
+	}
+	if len(probe.Profile) < 2 {
+		return false, nil
+	}
+
+	var extra map[string]json.RawMessage
+	if err := json.Unmarshal(probe.Profile[1], &extra); err != nil {
+		return false, nil
+	}
+
+	_, hasFormats := extra["formats"]
+	return hasFormats, nil
+}
+
+// rollbackProfileExtra is the profile "extra" object shape used by the
+// original pre-transform info.json format: only "supports" (no
+// "formats"/"qualities", unlike the corrected format's profile).
+type rollbackProfileExtra struct {
+	Supports []string `json:"supports"`
+}
+
+// rollbackProfile is the fixed pre-transform profile value, restoring
+// "sizeByWhListed" to supports (dropped by the forward transform).
+var rollbackProfile = []interface{}{
+	"http://iiif.io/api/image/2/level0.json",
+	rollbackProfileExtra{
+		Supports: []string{"cors", "sizeByWhListed", "baseUriRedirect"},
+	},
+}
+
+// rollbackSize is one entry of the pre-transform "sizes" array.
+type rollbackSize struct {
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
+
+// backupSizes extracts just the "sizes" array from a backup_info.json
+// file; the forward transform drops "sizes" and it can't be recovered from
+// the corrected info.json alone, so a rollback must read it back out of the
+// pre-transform backup instead.
+type backupSizes struct {
+	Sizes []rollbackSize `json:"sizes"`
+}
+
+// rollbackTile mirrors the pre-transform tiles[] entry field order (width
+// before scaleFactors).
+type rollbackTile struct {
+	Width        int   `json:"width"`
+	ScaleFactors []int `json:"scaleFactors"`
+}
+
+// rollbackInfo is the reconstructed pre-transform ("input format")
+// info.json shape, mirroring the field order of the original tiler output.
+type rollbackInfo struct {
+	Context  string         `json:"@context"`
+	ID       string         `json:"@id"`
+	Protocol string         `json:"protocol"`
+	Width    int            `json:"width"`
+	Height   int            `json:"height"`
+	Sizes    []rollbackSize `json:"sizes"`
+	Profile  []interface{}  `json:"profile"`
+	Tiles    []rollbackTile `json:"tiles"`
+}
+
+// rollbackInfoJSON converts an info.json's current (corrected/output
+// format) bytes back to the tool's pre-transform ("input format") shape.
+// @id, width, height, and tiles are read from currentData. "sizes" cannot
+// be recovered from the corrected format (the forward transform drops it),
+// so it's read from backupData — the pre-transform backup written before
+// the original transform ran — instead. @context, protocol, and profile
+// are restored to their fixed pre-transform values.
+func rollbackInfoJSON(currentData, backupData []byte) ([]byte, error) {
+	var current outputInfo
+	if err := json.Unmarshal(currentData, &current); err != nil {
+		return nil, fmt.Errorf("parsing current info.json: %w", err)
+	}
+
+	var backup backupSizes
+	if err := json.Unmarshal(backupData, &backup); err != nil {
+		return nil, fmt.Errorf("parsing backup_info.json: %w", err)
+	}
+
+	tiles := make([]rollbackTile, 0, len(current.Tiles))
+	for _, t := range current.Tiles {
+		tiles = append(tiles, rollbackTile{
+			Width:        t.Width,
+			ScaleFactors: t.ScaleFactors,
+		})
+	}
+
+	out := rollbackInfo{
+		Context:  requiredContext,
+		ID:       current.ID,
+		Protocol: requiredProtocol,
+		Width:    current.Width,
+		Height:   current.Height,
+		Sizes:    backup.Sizes,
+		Profile:  rollbackProfile,
+		Tiles:    tiles,
+	}
+
+	newData, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("re-marshaling rolled-back info.json: %w", err)
 	}
 	return append(newData, '\n'), nil
 }
@@ -361,9 +488,22 @@ func uploadObject(ctx context.Context, client *s3.Client, bucket, key string, da
 	return nil
 }
 
+// deleteObject removes key from bucket.
+func deleteObject(ctx context.Context, client *s3.Client, bucket, key string) error {
+	_, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return fmt.Errorf("deleting %q: %w", key, err)
+	}
+	return nil
+}
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to YAML config file")
 	dryRunFlag := flag.Bool("dry-run", false, "force dry-run mode (scan and report only, no writes); overrides dry_run: false in the config file")
+	rollback := flag.Bool("rollback", false, "reverse mode: convert each discovered info.json from the corrected/output format back to the original input format, then delete its backup_info.json")
 	flag.Parse()
 
 	cfg, err := loadConfig(*configPath)
@@ -384,6 +524,9 @@ func main() {
 	mode := "LIVE (objects will be written)"
 	if dryRun {
 		mode = "DRY RUN (no objects will be written)"
+	}
+	if *rollback {
+		mode = "ROLLBACK " + mode
 	}
 	collectionRootPrefix := cfg.CollectionPrefix + cfg.CollectionIdentifier + "/"
 	tilesPrefix := collectionRootPrefix + cfg.TilesDirName + "/"
@@ -409,28 +552,31 @@ func main() {
 	}
 	log.Printf("found %d %s object(s) under %s<archive_identifier>-<index>/", len(infoKeys), cfg.InfoFileName, tilesPrefix)
 
-	var backedUp, modified, failed int
-
-	for _, infoKey := range infoKeys {
-		backupKey := backupKeyFor(infoKey, cfg.InfoFileName, cfg.BackupFileName)
-
-		if dryRun {
-			log.Printf("[DRY RUN] would back up %q -> %q", infoKey, backupKey)
-		} else {
-			if err := backupObject(ctx, client, cfg.Bucket, infoKey, backupKey); err != nil {
-				failed++
-				log.Printf("ERROR backing up %q: %v", infoKey, err)
-				continue
-			}
-			backedUp++
-			log.Printf("backed up %q -> %q", infoKey, backupKey)
-		}
+	if *rollback {
+		runRollback(ctx, client, cfg, infoKeys, dryRun)
+		return
 	}
+	runTransform(ctx, client, cfg, infoKeys, dryRun)
+}
 
-	if failed > 0 {
-		log.Printf("aborting before modification step: %d backup(s) failed", failed)
-		os.Exit(1)
-	}
+// pendingTransform is an info.json object confirmed (by isAlreadyTransformed)
+// to still be in the original pre-transform format, and therefore safe to
+// back up and rewrite.
+type pendingTransform struct {
+	key       string
+	backupKey string
+	data      []byte
+}
+
+// runTransform backs up, then transforms and writes back, each object in
+// infoKeys that isn't already in the corrected/output format (the normal,
+// forward mode of operation). Objects already in the corrected format are
+// skipped entirely — neither backed up nor rewritten — so that running the
+// tool again over an already-processed collection can't overwrite a
+// backup_info.json with already-corrected content.
+func runTransform(ctx context.Context, client *s3.Client, cfg *Config, infoKeys []string, dryRun bool) {
+	var toProcess []pendingTransform
+	var skipped, failed int
 
 	for _, infoKey := range infoKeys {
 		data, err := downloadObject(ctx, client, cfg.Bucket, infoKey)
@@ -440,32 +586,137 @@ func main() {
 			continue
 		}
 
-		newData, err := transformInfoJSON(data)
+		alreadyTransformed, err := isAlreadyTransformed(data)
 		if err != nil {
 			failed++
-			log.Printf("ERROR transforming %q: %v", infoKey, err)
+			log.Printf("ERROR inspecting %q: %v", infoKey, err)
+			continue
+		}
+		if alreadyTransformed {
+			skipped++
+			log.Printf("skipping %q: already in corrected format, leaving its backup untouched", infoKey)
+			continue
+		}
+
+		toProcess = append(toProcess, pendingTransform{
+			key:       infoKey,
+			backupKey: backupKeyFor(infoKey, cfg.InfoFileName, cfg.BackupFileName),
+			data:      data,
+		})
+	}
+
+	var backedUp, backupFailed int
+	for _, p := range toProcess {
+		if dryRun {
+			log.Printf("[DRY RUN] would back up %q -> %q", p.key, p.backupKey)
+			continue
+		}
+		if err := backupObject(ctx, client, cfg.Bucket, p.key, p.backupKey); err != nil {
+			backupFailed++
+			log.Printf("ERROR backing up %q: %v", p.key, err)
+			continue
+		}
+		backedUp++
+		log.Printf("backed up %q -> %q", p.key, p.backupKey)
+	}
+	failed += backupFailed
+
+	if backupFailed > 0 {
+		log.Printf("aborting before modification step: %d backup(s) failed", backupFailed)
+		os.Exit(1)
+	}
+
+	var modified int
+	for _, p := range toProcess {
+		newData, err := transformInfoJSON(p.data)
+		if err != nil {
+			failed++
+			log.Printf("ERROR transforming %q: %v", p.key, err)
 			continue
 		}
 
 		if dryRun {
-			log.Printf("[DRY RUN] would write modified %q (%d bytes -> %d bytes)", infoKey, len(data), len(newData))
+			log.Printf("[DRY RUN] would write modified %q (%d bytes -> %d bytes)", p.key, len(p.data), len(newData))
+			continue
+		}
+
+		if err := uploadObject(ctx, client, cfg.Bucket, p.key, newData); err != nil {
+			failed++
+			log.Printf("ERROR uploading %q: %v", p.key, err)
+			continue
+		}
+
+		modified++
+		log.Printf("modified %q", p.key)
+	}
+
+	if dryRun {
+		log.Printf("done: found=%d skipped=%d (dry run, nothing written)", len(infoKeys), skipped)
+	} else {
+		log.Printf("done: found=%d skipped=%d backed_up=%d modified=%d failed=%d", len(infoKeys), skipped, backedUp, modified, failed)
+	}
+
+	if failed > 0 {
+		os.Exit(1)
+	}
+}
+
+// runRollback converts each object in infoKeys from the corrected/output
+// format back to the original input format (using its backup_info.json to
+// recover the "sizes" field, which the forward transform drops), writes it
+// back to its key, then deletes that key's backup_info.json.
+func runRollback(ctx context.Context, client *s3.Client, cfg *Config, infoKeys []string, dryRun bool) {
+	var rolledBack, failed int
+
+	for _, infoKey := range infoKeys {
+		backupKey := backupKeyFor(infoKey, cfg.InfoFileName, cfg.BackupFileName)
+
+		currentData, err := downloadObject(ctx, client, cfg.Bucket, infoKey)
+		if err != nil {
+			failed++
+			log.Printf("ERROR downloading %q: %v", infoKey, err)
+			continue
+		}
+
+		backupData, err := downloadObject(ctx, client, cfg.Bucket, backupKey)
+		if err != nil {
+			failed++
+			log.Printf("ERROR downloading backup %q: %v", backupKey, err)
+			continue
+		}
+
+		newData, err := rollbackInfoJSON(currentData, backupData)
+		if err != nil {
+			failed++
+			log.Printf("ERROR rolling back %q: %v", infoKey, err)
+			continue
+		}
+
+		if dryRun {
+			log.Printf("[DRY RUN] would roll back %q (%d bytes -> %d bytes) and remove backup %q", infoKey, len(currentData), len(newData), backupKey)
 			continue
 		}
 
 		if err := uploadObject(ctx, client, cfg.Bucket, infoKey, newData); err != nil {
 			failed++
-			log.Printf("ERROR uploading %q: %v", infoKey, err)
+			log.Printf("ERROR uploading rolled-back %q: %v", infoKey, err)
 			continue
 		}
 
-		modified++
-		log.Printf("modified %q", infoKey)
+		if err := deleteObject(ctx, client, cfg.Bucket, backupKey); err != nil {
+			failed++
+			log.Printf("ERROR removing backup %q: %v", backupKey, err)
+			continue
+		}
+
+		rolledBack++
+		log.Printf("rolled back %q, removed backup %q", infoKey, backupKey)
 	}
 
 	if dryRun {
 		log.Printf("done: found=%d (dry run, nothing written)", len(infoKeys))
 	} else {
-		log.Printf("done: found=%d backed_up=%d modified=%d failed=%d", len(infoKeys), backedUp, modified, failed)
+		log.Printf("done: found=%d rolled_back=%d failed=%d", len(infoKeys), rolledBack, failed)
 	}
 
 	if failed > 0 {

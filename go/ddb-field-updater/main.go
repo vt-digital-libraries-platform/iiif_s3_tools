@@ -1,6 +1,7 @@
 // Command ddb-field-updater scans a DynamoDB table and, for every item whose
-// specified field begins with a configured prefix, rewrites that prefix to a
-// new value and writes the item back to the table.
+// specified field matches a configured value (either as a prefix or the
+// field's full value), rewrites the field and writes the item back to the
+// table.
 package main
 
 import (
@@ -21,12 +22,12 @@ import (
 )
 
 type Config struct {
-	Region      string `yaml:"region"`
-	TableName   string `yaml:"table_name"`
-	FieldName   string `yaml:"field_name"`
-	MatchPrefix string `yaml:"match_prefix"`
-	NewValue    string `yaml:"new_value"`
-	DryRun      bool   `yaml:"dry_run"`
+	Region    string  `yaml:"region"`
+	TableName string  `yaml:"table_name"`
+	FieldName string  `yaml:"field_name"`
+	Matches   Matches `yaml:"matches"`
+	NewValue  string  `yaml:"new_value"`
+	DryRun    bool    `yaml:"dry_run"`
 
 	// IsJSON indicates that the attribute named by FieldName is a JSON
 	// string (e.g. an AppSync AWSJSON field, stored in DynamoDB as a plain
@@ -37,9 +38,81 @@ type Config struct {
 	IsJSON        bool   `yaml:"is_json"`
 	JSONFieldPath string `yaml:"json_field_path"`
 
+	// Conditions is an optional list of query conditions that an item must
+	// satisfy (all of them) to be considered for updating. If empty, no
+	// filtering is applied and every scanned item is evaluated.
+	Conditions []Condition `yaml:"conditions"`
+
 	// jsonPathSegments is JSONFieldPath split on "." and is populated by
 	// loadConfig; not read from YAML directly.
 	jsonPathSegments []string `yaml:"-"`
+}
+
+// Condition describes a single db field:value filter that a scanned item
+// must satisfy before it is evaluated for updating.
+type Condition struct {
+	// Field is the top-level item attribute name to check.
+	Field string `yaml:"field"`
+
+	// Operator selects how Value (if any) is compared against the
+	// attribute. One of: "equals" (default), "contains", "exists",
+	// "not_exists".
+	//
+	// "equals" requires the attribute to be a String or Number whose value
+	// exactly matches Value.
+	//
+	// "contains" is for multi-valued fields (a String/Number Set, a List,
+	// or a String treated as a substring haystack) and requires Value to
+	// be one of the field's values (or a substring, for a plain String).
+	//
+	// "exists" / "not_exists" ignore Value and only check whether the
+	// attribute is present on the item at all.
+	Operator string `yaml:"operator"`
+
+	// Value is the value to compare against. Required for "equals" and
+	// "contains"; ignored for "exists" and "not_exists".
+	Value string `yaml:"value"`
+}
+
+const (
+	condEquals    = "equals"
+	condContains  = "contains"
+	condExists    = "exists"
+	condNotExists = "not_exists"
+)
+
+// Matches describes the value to look for in the targeted field, and
+// whether it should be compared against the start of the field's value
+// (prefix) or the field's entire value (full).
+type Matches struct {
+	Value string `yaml:"value"`
+
+	// Type is one of "prefix" (default) or "full".
+	Type string `yaml:"type"`
+}
+
+const (
+	matchPrefix = "prefix"
+	matchFull   = "full"
+)
+
+// matchAndReplace checks oldVal against m and, if it matches, returns the
+// replacement value to write back. For a "prefix" match, only the matched
+// prefix is replaced and the remainder of oldVal is preserved; for a "full"
+// match, oldVal is replaced with newValue in its entirety.
+func matchAndReplace(m Matches, oldVal, newValue string) (newVal string, matched bool) {
+	switch m.Type {
+	case matchFull:
+		if oldVal != m.Value {
+			return "", false
+		}
+		return newValue, true
+	default: // matchPrefix
+		if !strings.HasPrefix(oldVal, m.Value) {
+			return "", false
+		}
+		return newValue + strings.TrimPrefix(oldVal, m.Value), true
+	}
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -63,14 +136,41 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.FieldName == "" {
 		missing = append(missing, "field_name")
 	}
-	if cfg.MatchPrefix == "" {
-		missing = append(missing, "match_prefix")
+	if cfg.Matches.Value == "" {
+		missing = append(missing, "matches.value")
 	}
 	if cfg.IsJSON && cfg.JSONFieldPath == "" {
 		missing = append(missing, "json_field_path (required when is_json is true)")
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("config file is missing required field(s): %s", strings.Join(missing, ", "))
+	}
+
+	if cfg.Matches.Type == "" {
+		cfg.Matches.Type = matchPrefix
+	}
+	if cfg.Matches.Type != matchPrefix && cfg.Matches.Type != matchFull {
+		return nil, fmt.Errorf("matches.type must be %q or %q, got %q", matchPrefix, matchFull, cfg.Matches.Type)
+	}
+
+	for i := range cfg.Conditions {
+		c := &cfg.Conditions[i]
+		if c.Field == "" {
+			return nil, fmt.Errorf("conditions[%d]: field is required", i)
+		}
+		if c.Operator == "" {
+			c.Operator = condEquals
+		}
+		switch c.Operator {
+		case condEquals, condContains:
+			if c.Value == "" {
+				return nil, fmt.Errorf("conditions[%d]: value is required for operator %q", i, c.Operator)
+			}
+		case condExists, condNotExists:
+			// Value is not used.
+		default:
+			return nil, fmt.Errorf("conditions[%d]: unknown operator %q (must be one of: equals, contains, exists, not_exists)", i, c.Operator)
+		}
 	}
 
 	if cfg.IsJSON {
@@ -234,6 +334,83 @@ func setNestedAttrString(root map[string]types.AttributeValue, path []string, ne
 	}
 }
 
+// itemMatchesConditions reports whether item satisfies every condition in
+// cfg.Conditions. If cfg.Conditions is empty, every item matches (no
+// filtering).
+func itemMatchesConditions(cfg *Config, item map[string]types.AttributeValue) bool {
+	for _, c := range cfg.Conditions {
+		av, ok := item[c.Field]
+
+		switch c.Operator {
+		case condExists:
+			if !ok {
+				return false
+			}
+		case condNotExists:
+			if ok {
+				return false
+			}
+		case condContains:
+			if !ok || !attrContains(av, c.Value) {
+				return false
+			}
+		default: // condEquals
+			if !ok || !attrEquals(av, c.Value) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// attrEquals reports whether a scalar String or Number attribute's value
+// exactly equals want.
+func attrEquals(av types.AttributeValue, want string) bool {
+	switch v := av.(type) {
+	case *types.AttributeValueMemberS:
+		return v.Value == want
+	case *types.AttributeValueMemberN:
+		return v.Value == want
+	default:
+		return false
+	}
+}
+
+// attrContains reports whether want is one of the values held by a
+// multi-valued attribute (String Set, Number Set, or List), a substring of
+// a plain String attribute, or an exact match of a plain Number attribute.
+func attrContains(av types.AttributeValue, want string) bool {
+	switch v := av.(type) {
+	case *types.AttributeValueMemberS:
+		return strings.Contains(v.Value, want)
+	case *types.AttributeValueMemberN:
+		return v.Value == want
+	case *types.AttributeValueMemberSS:
+		for _, s := range v.Value {
+			if s == want {
+				return true
+			}
+		}
+		return false
+	case *types.AttributeValueMemberNS:
+		for _, s := range v.Value {
+			if s == want {
+				return true
+			}
+		}
+		return false
+	case *types.AttributeValueMemberL:
+		for _, elem := range v.Value {
+			if attrEquals(elem, want) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
 // evaluateItem checks whether item matches cfg's field/prefix rule and, if
 // so, mutates item in place with the replacement value. It returns whether a
 // match was found along with the old and new string values (the whole field
@@ -254,11 +431,11 @@ func evaluateItem(cfg *Config, item map[string]types.AttributeValue) (matched bo
 		if !ok {
 			return false, "", "", nil
 		}
-		if !strings.HasPrefix(strAV.Value, cfg.MatchPrefix) {
+		oldVal = strAV.Value
+		newVal, ok = matchAndReplace(cfg.Matches, oldVal, cfg.NewValue)
+		if !ok {
 			return false, "", "", nil
 		}
-		oldVal = strAV.Value
-		newVal = cfg.NewValue + strings.TrimPrefix(oldVal, cfg.MatchPrefix)
 		item[cfg.FieldName] = &types.AttributeValueMemberS{Value: newVal}
 		return true, oldVal, newVal, nil
 	}
@@ -276,12 +453,15 @@ func evaluateItem(cfg *Config, item map[string]types.AttributeValue) (matched bo
 		}
 
 		nestedVal, ok := getNestedString(parsed, cfg.jsonPathSegments)
-		if !ok || !strings.HasPrefix(nestedVal, cfg.MatchPrefix) {
+		if !ok {
+			return false, "", "", nil
+		}
+		newVal, ok = matchAndReplace(cfg.Matches, nestedVal, cfg.NewValue)
+		if !ok {
 			return false, "", "", nil
 		}
 
 		oldVal = nestedVal
-		newVal = cfg.NewValue + strings.TrimPrefix(nestedVal, cfg.MatchPrefix)
 		if !setNestedString(parsed, cfg.jsonPathSegments, newVal) {
 			return false, "", "", fmt.Errorf("failed to set json_field_path %q", cfg.JSONFieldPath)
 		}
@@ -298,12 +478,15 @@ func evaluateItem(cfg *Config, item map[string]types.AttributeValue) (matched bo
 		// mutates the same map item[cfg.FieldName] already points to, so no
 		// reassignment into item is needed.
 		nestedVal, ok := getNestedAttrString(v.Value, cfg.jsonPathSegments)
-		if !ok || !strings.HasPrefix(nestedVal, cfg.MatchPrefix) {
+		if !ok {
+			return false, "", "", nil
+		}
+		newVal, ok = matchAndReplace(cfg.Matches, nestedVal, cfg.NewValue)
+		if !ok {
 			return false, "", "", nil
 		}
 
 		oldVal = nestedVal
-		newVal = cfg.NewValue + strings.TrimPrefix(nestedVal, cfg.MatchPrefix)
 		if !setNestedAttrString(v.Value, cfg.jsonPathSegments, newVal) {
 			return false, "", "", fmt.Errorf("failed to set json_field_path %q", cfg.JSONFieldPath)
 		}
@@ -382,7 +565,10 @@ func main() {
 	if cfg.IsJSON {
 		target = fmt.Sprintf("%s (AWSJSON) -> %s", cfg.FieldName, cfg.JSONFieldPath)
 	}
-	log.Printf("table=%s field=%s match_prefix=%q new_value=%q mode=%s", cfg.TableName, target, cfg.MatchPrefix, cfg.NewValue, mode)
+	log.Printf("table=%s field=%s matches=%q (%s) new_value=%q mode=%s", cfg.TableName, target, cfg.Matches.Value, cfg.Matches.Type, cfg.NewValue, mode)
+	if len(cfg.Conditions) > 0 {
+		log.Printf("conditions=%v", cfg.Conditions)
+	}
 
 	var scanned, matched, updated, failed int
 
@@ -399,6 +585,10 @@ func main() {
 		for _, item := range page.Items {
 			scanned++
 			keyDesc := describeItemKey(item, keys)
+
+			if !itemMatchesConditions(cfg, item) {
+				continue
+			}
 
 			isMatch, oldVal, newVal, err := evaluateItem(cfg, item)
 			if err != nil {

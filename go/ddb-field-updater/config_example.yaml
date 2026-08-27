@@ -13,12 +13,21 @@ table_name: < your table name >
 # containing JSON text -- see is_json below).
 field_name: archiveOptions
 
-# If the attribute's value starts with this prefix, it will be updated.
-match_prefix: "https://< something something >.cloudfront.net"
+# The value to look for in the targeted field, and whether it should be
+# compared against the start of the field's value or the field's entire
+# value.
+#   value: the string to look for
+#   type:  "prefix" (default) -- the field's value must start with value
+#          "full"             -- the field's value must equal value exactly
+matches:
+  value: "https://< something something >.cloudfront.net"
+  type: prefix
 
-# The matching prefix is replaced with this value; the remainder of the
-# original string (everything after the matched prefix) is kept as-is.
+# The replacement value.
+# For a "prefix" match, only the matched prefix is replaced and the
+# remainder of the original string (everything after it) is kept as-is.
 # Example: "old-prefix-1234" -> "new-prefix-1234"
+# For a "full" match, the field's entire value is replaced with new_value.
 new_value: "https://< something something >.cloudfront.net"
 
 # Set to true if field_name points to an AWSJSON attribute -- i.e. the
@@ -37,6 +46,33 @@ is_json: true
 # unchanged (note: unrelated object keys will be alphabetized and whitespace
 # normalized as a side effect of re-serializing the JSON).
 json_field_path: "assets.env_config"
+
+# Optional: a list of query conditions that an item must satisfy (all of
+# them) before it is considered for updating. If omitted or empty, no
+# filtering is applied and every scanned item is evaluated as before.
+#
+# Each condition has:
+#   field:    top-level item attribute name to check
+#   operator: "equals" (default), "contains", "exists", or "not_exists"
+#   value:    required for "equals"/"contains"; ignored otherwise
+#
+# "equals" requires the attribute to be a String/Number that exactly
+# matches value. "contains" is for multi-valued fields -- a String/Number
+# Set or a List -- and checks whether value is one of the field's values
+# (for a plain String attribute, it checks for value as a substring
+# instead). "exists"/"not_exists" only check whether the attribute is
+# present on the item at all, regardless of its value.
+#
+# conditions:
+#   - field: status
+#     value: "active"
+#   - field: tags
+#     operator: contains
+#     value: "featured"
+#   - field: legacy_id
+#     operator: exists
+#   - field: migrated
+#     operator: not_exists
 
 # When true, the table is scanned and matches are reported but no writes
 # are made to DynamoDB. Can also be forced on with the -dry-run CLI flag

@@ -117,19 +117,21 @@ PNG, or additional `supports` features), edit the `requiredContext`,
 
 ## Rollback
 
-Run with `-rollback` to reverse the transform for every discovered
-`info.json`: convert it from the corrected/output format back to the
-original pre-transform ("input") format, write that back to the same key,
-then delete that key's `backup_info.json`.
+Run with `-rollback` to restore every discovered `info.json` from its
+`backup_info.json`: for each key, the backup is checked
+(`isPreTransformShape`) to confirm it's actually a pre-transform object —
+it has a non-empty `sizes` array and its `profile` doesn't declare
+`formats` — and if so, it's copied over the `info.json` key (a
+server-side S3 copy, the same "move" idiom `aws s3 mv` uses under the
+hood) and then deleted. This restores the true original bytes, rather
+than reconstructing an approximation of them from hardcoded field values.
 
 Discovery works exactly the same as a normal run (DynamoDB Collection →
 Archive → S3 key list) — rollback just uses a different per-key action.
-Because the forward transform drops the `sizes` array (it isn't derivable
-from anything left in the corrected format), rollback recovers it from the
-`backup_info.json` written alongside the original transform, rather than
-inventing it. **A `backup_info.json` must exist for every key being rolled
-back** — if one is missing, that key fails and is counted in the summary's
-`failed` total; no backups are deleted for keys that fail.
+**A `backup_info.json` must exist for every key being rolled back** — if
+one is missing, or doesn't pass the pre-transform shape check, that key
+fails and is counted in the summary's `failed` total; no backups are
+deleted for keys that fail.
 
 ```sh
 # Dry run first:
@@ -139,10 +141,10 @@ back** — if one is missing, that key fails and is counted in the summary's
 ./iiif-infoFile-modifier -config config.yaml -rollback
 ```
 
-See `rollbackInfoJSON` in [`main.go`](main.go). `TestRollbackInfoJSON_ReversesTransform`
-in [`main_test.go`](main_test.go) verifies that transforming
-`incorrect_info.json` and then rolling it back (using the original file as
-its own "backup") reproduces `incorrect_info.json` exactly.
+See `runRollback` and `isPreTransformShape` in [`main.go`](main.go).
+`TestIsPreTransformShape` in [`main_test.go`](main_test.go) verifies the
+shape check accepts `incorrect_info.json` (pre-transform) and rejects
+`corrected_info.json` (post-transform).
 
 ## Configuration
 
@@ -209,7 +211,7 @@ On the target bucket/prefix:
 - `s3:ListBucket`
 - `s3:GetObject`
 - `s3:PutObject`
-- `s3:CopyObject` (used for the backup step)
+- `s3:CopyObject` (used for the backup step, and to restore from backup during `-rollback`)
 - `s3:DeleteObject` (used to remove `backup_info.json` during `-rollback`)
 
 On `collection_table` and `archive_table`:
@@ -225,7 +227,7 @@ go test ./...     # runs the transform against incorrect_info.json / corrected_i
 ```
 
 `main_test.go` verifies the transform against the two fixture files in this
-directory, checks idempotency, checks that rollback reverses the transform,
-and checks `isAlreadyTransformed` correctly distinguishes the two fixtures;
-there's no S3/DynamoDB interaction in the test suite, so no AWS credentials
-are needed to run it.
+directory, checks idempotency, and checks that `isAlreadyTransformed` and
+`isPreTransformShape` correctly distinguish the two fixtures; there's no
+S3/DynamoDB interaction in the test suite, so no AWS credentials are needed
+to run it.

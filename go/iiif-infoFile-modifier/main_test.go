@@ -35,32 +35,26 @@ func TestTransformInfoJSON_MatchesCorrectedFixture(t *testing.T) {
 	}
 }
 
-func TestRollbackInfoJSON_ReversesTransform(t *testing.T) {
+func TestIsPreTransformShape(t *testing.T) {
 	original, err := os.ReadFile("incorrect_info.json")
 	if err != nil {
 		t.Fatalf("reading fixture: %v", err)
 	}
-
-	transformed, err := transformInfoJSON(original)
+	corrected, err := os.ReadFile("corrected_info.json")
 	if err != nil {
-		t.Fatalf("transformInfoJSON: %v", err)
+		t.Fatalf("reading fixture: %v", err)
 	}
 
-	got, err := rollbackInfoJSON(transformed, original)
-	if err != nil {
-		t.Fatalf("rollbackInfoJSON: %v", err)
+	if got, err := isPreTransformShape(original); err != nil {
+		t.Fatalf("isPreTransformShape(original): %v", err)
+	} else if !got {
+		t.Errorf("isPreTransformShape(original) = false, want true")
 	}
 
-	var gotVal, wantVal interface{}
-	if err := json.Unmarshal(got, &gotVal); err != nil {
-		t.Fatalf("unmarshaling rollback output: %v", err)
-	}
-	if err := json.Unmarshal(original, &wantVal); err != nil {
-		t.Fatalf("unmarshaling original fixture: %v", err)
-	}
-
-	if !reflect.DeepEqual(gotVal, wantVal) {
-		t.Fatalf("rollback output does not match original fixture\ngot:  %s\nwant: %s", got, original)
+	if got, err := isPreTransformShape(corrected); err != nil {
+		t.Fatalf("isPreTransformShape(corrected): %v", err)
+	} else if got {
+		t.Errorf("isPreTransformShape(corrected) = true, want false")
 	}
 }
 

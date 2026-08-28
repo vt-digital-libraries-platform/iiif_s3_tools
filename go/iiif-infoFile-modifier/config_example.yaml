@@ -47,6 +47,11 @@ backup_file_name: backup_info.json
 # be touched.
 tiles_dir_name: tiles
 
+# How many S3/DynamoDB requests to run in parallel (per-archive listing,
+# and per-key download/backup/transform/upload or rollback). Defaults to 10
+# if unset or <= 0.
+concurrency: 10
+
 # When true, the bucket is scanned and planned changes are reported but no
 # objects are written to S3 (no backups, no modified info.json). Can also be
 # forced on with the -dry-run CLI flag regardless of what is set here.

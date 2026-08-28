@@ -27,6 +27,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -35,6 +36,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"gopkg.in/yaml.v3"
 )
+
+// defaultConcurrency is how many S3/DynamoDB requests run in parallel when
+// concurrency isn't set in the config.
+const defaultConcurrency = 10
 
 type Config struct {
 	Region               string `yaml:"region"`
@@ -46,6 +51,7 @@ type Config struct {
 	CollectionTable      string `yaml:"collection_table"`
 	ArchiveTable         string `yaml:"archive_table"`
 	CollectionIdentifier string `yaml:"collection_identifier"`
+	Concurrency          int    `yaml:"concurrency"`
 	DryRun               bool   `yaml:"dry_run"`
 }
 
@@ -68,6 +74,9 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.TilesDirName == "" {
 		cfg.TilesDirName = "tiles"
+	}
+	if cfg.Concurrency <= 0 {
+		cfg.Concurrency = defaultConcurrency
 	}
 
 	var missing []string
@@ -246,6 +255,36 @@ func isPreTransformShape(data []byte) (bool, error) {
 	return !hasFormats, nil
 }
 
+// runConcurrent calls fn(i) once for every i in [0, n), running up to
+// concurrency calls at a time, and blocks until all have returned. fn is
+// responsible for recording its own result (e.g. by writing to index i of a
+// pre-sized slice) since callers are expected to run purely independent,
+// index-addressable work items (S3/DynamoDB requests) through this.
+func runConcurrent(n, concurrency int, fn func(i int)) {
+	if n == 0 {
+		return
+	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if concurrency > n {
+		concurrency = n
+	}
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, concurrency)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			fn(i)
+		}(i)
+	}
+	wg.Wait()
+}
+
 // findCollectionID scans collectionTable for the item whose "identifier"
 // attribute equals collectionIdentifier and returns that item's "id"
 // attribute value. Returns an error if zero or more than one match is
@@ -335,12 +374,17 @@ func findArchiveIdentifiers(ctx context.Context, client *dynamodb.Client, archiv
 // The IIIF spec places other, differently-formatted info.json files outside
 // of tilesPrefix (e.g. presentation manifests); those are intentionally left
 // alone.
-func findInfoObjects(ctx context.Context, client *s3.Client, bucket, tilesPrefix, infoFileName string, archiveIdentifiers []string) ([]string, error) {
-	var keys []string
+func findInfoObjects(ctx context.Context, client *s3.Client, bucket, tilesPrefix, infoFileName string, archiveIdentifiers []string, concurrency int) ([]string, error) {
+	type listResult struct {
+		keys []string
+		err  error
+	}
+	results := make([]listResult, len(archiveIdentifiers))
 
-	for _, identifier := range archiveIdentifiers {
-		identifierPrefix := tilesPrefix + identifier + "-"
+	runConcurrent(len(archiveIdentifiers), concurrency, func(i int) {
+		identifierPrefix := tilesPrefix + archiveIdentifiers[i] + "-"
 
+		var keys []string
 		paginator := s3.NewListObjectsV2Paginator(client, &s3.ListObjectsV2Input{
 			Bucket: aws.String(bucket),
 			Prefix: aws.String(identifierPrefix),
@@ -349,7 +393,8 @@ func findInfoObjects(ctx context.Context, client *s3.Client, bucket, tilesPrefix
 		for paginator.HasMorePages() {
 			page, err := paginator.NextPage(ctx)
 			if err != nil {
-				return nil, fmt.Errorf("listing objects under %q: %w", identifierPrefix, err)
+				results[i] = listResult{err: fmt.Errorf("listing objects under %q: %w", identifierPrefix, err)}
+				return
 			}
 			for _, obj := range page.Contents {
 				key := aws.ToString(obj.Key)
@@ -361,8 +406,16 @@ func findInfoObjects(ctx context.Context, client *s3.Client, bucket, tilesPrefix
 				keys = append(keys, key)
 			}
 		}
-	}
+		results[i] = listResult{keys: keys}
+	})
 
+	var keys []string
+	for _, r := range results {
+		if r.err != nil {
+			return nil, r.err
+		}
+		keys = append(keys, r.keys...)
+	}
 	return keys, nil
 }
 
@@ -464,8 +517,8 @@ func main() {
 	collectionRootPrefix := cfg.CollectionPrefix + cfg.CollectionIdentifier + "/"
 	tilesPrefix := collectionRootPrefix + cfg.TilesDirName + "/"
 
-	log.Printf("bucket=%s tiles_prefix=%s info_file_name=%s backup_file_name=%s mode=%s",
-		cfg.Bucket, tilesPrefix, cfg.InfoFileName, cfg.BackupFileName, mode)
+	log.Printf("bucket=%s tiles_prefix=%s info_file_name=%s backup_file_name=%s concurrency=%d mode=%s",
+		cfg.Bucket, tilesPrefix, cfg.InfoFileName, cfg.BackupFileName, cfg.Concurrency, mode)
 
 	collectionID, err := findCollectionID(ctx, ddbClient, cfg.CollectionTable, cfg.CollectionIdentifier)
 	if err != nil {
@@ -479,7 +532,7 @@ func main() {
 	}
 	log.Printf("found %d archive identifier(s) in table %s for collection id=%s", len(archiveIdentifiers), cfg.ArchiveTable, collectionID)
 
-	infoKeys, err := findInfoObjects(ctx, client, cfg.Bucket, tilesPrefix, cfg.InfoFileName, archiveIdentifiers)
+	infoKeys, err := findInfoObjects(ctx, client, cfg.Bucket, tilesPrefix, cfg.InfoFileName, archiveIdentifiers, cfg.Concurrency)
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
@@ -508,49 +561,80 @@ type pendingTransform struct {
 // tool again over an already-processed collection can't overwrite a
 // backup_info.json with already-corrected content.
 func runTransform(ctx context.Context, client *s3.Client, cfg *Config, infoKeys []string, dryRun bool) {
-	var toProcess []pendingTransform
-	var skipped, failed int
-
-	for _, infoKey := range infoKeys {
+	// Phase 1: download and classify each key concurrently.
+	type classifyResult struct {
+		err     error
+		skip    bool
+		pending pendingTransform
+	}
+	classified := make([]classifyResult, len(infoKeys))
+	runConcurrent(len(infoKeys), cfg.Concurrency, func(i int) {
+		infoKey := infoKeys[i]
 		data, err := downloadObject(ctx, client, cfg.Bucket, infoKey)
 		if err != nil {
-			failed++
-			log.Printf("ERROR downloading %q: %v", infoKey, err)
-			continue
+			classified[i] = classifyResult{err: fmt.Errorf("downloading %q: %w", infoKey, err)}
+			return
 		}
 
 		alreadyTransformed, err := isAlreadyTransformed(data)
 		if err != nil {
-			failed++
-			log.Printf("ERROR inspecting %q: %v", infoKey, err)
-			continue
+			classified[i] = classifyResult{err: fmt.Errorf("inspecting %q: %w", infoKey, err)}
+			return
 		}
 		if alreadyTransformed {
-			skipped++
-			log.Printf("skipping %q: already in corrected format, leaving its backup untouched", infoKey)
-			continue
+			classified[i] = classifyResult{skip: true}
+			return
 		}
 
-		toProcess = append(toProcess, pendingTransform{
+		classified[i] = classifyResult{pending: pendingTransform{
 			key:       infoKey,
 			backupKey: backupKeyFor(infoKey, cfg.InfoFileName, cfg.BackupFileName),
 			data:      data,
+		}}
+	})
+
+	var toProcess []pendingTransform
+	var skipped, failed int
+	for i, r := range classified {
+		switch {
+		case r.err != nil:
+			failed++
+			log.Printf("ERROR %v", r.err)
+		case r.skip:
+			skipped++
+			log.Printf("skipping %q: already in corrected format, leaving its backup untouched", infoKeys[i])
+		default:
+			toProcess = append(toProcess, r.pending)
+		}
+	}
+
+	// Phase 2: back up every pending item concurrently; abort before any
+	// modification if even one backup fails.
+	backupErrs := make([]error, len(toProcess))
+	if dryRun {
+		for _, p := range toProcess {
+			log.Printf("[DRY RUN] would back up %q -> %q", p.key, p.backupKey)
+		}
+	} else {
+		runConcurrent(len(toProcess), cfg.Concurrency, func(i int) {
+			p := toProcess[i]
+			if err := copyObject(ctx, client, cfg.Bucket, p.key, p.backupKey); err != nil {
+				backupErrs[i] = fmt.Errorf("backing up %q: %w", p.key, err)
+			}
 		})
 	}
 
 	var backedUp, backupFailed int
-	for _, p := range toProcess {
-		if dryRun {
-			log.Printf("[DRY RUN] would back up %q -> %q", p.key, p.backupKey)
-			continue
-		}
-		if err := copyObject(ctx, client, cfg.Bucket, p.key, p.backupKey); err != nil {
+	for i, err := range backupErrs {
+		if err != nil {
 			backupFailed++
-			log.Printf("ERROR backing up %q: %v", p.key, err)
+			log.Printf("ERROR %v", err)
 			continue
 		}
-		backedUp++
-		log.Printf("backed up %q -> %q", p.key, p.backupKey)
+		if !dryRun {
+			backedUp++
+			log.Printf("backed up %q -> %q", toProcess[i].key, toProcess[i].backupKey)
+		}
 	}
 	failed += backupFailed
 
@@ -559,26 +643,39 @@ func runTransform(ctx context.Context, client *s3.Client, cfg *Config, infoKeys 
 		os.Exit(1)
 	}
 
-	var modified int
-	for _, p := range toProcess {
-		newData, err := transformInfoJSON(p.data)
-		if err != nil {
-			failed++
-			log.Printf("ERROR transforming %q: %v", p.key, err)
-			continue
-		}
+	// Phase 3: transform and upload every pending item concurrently.
+	uploadErrs := make([]error, len(toProcess))
+	if !dryRun {
+		runConcurrent(len(toProcess), cfg.Concurrency, func(i int) {
+			p := toProcess[i]
+			newData, err := transformInfoJSON(p.data)
+			if err != nil {
+				uploadErrs[i] = fmt.Errorf("transforming %q: %w", p.key, err)
+				return
+			}
+			if err := uploadObject(ctx, client, cfg.Bucket, p.key, newData); err != nil {
+				uploadErrs[i] = fmt.Errorf("uploading %q: %w", p.key, err)
+			}
+		})
+	}
 
+	var modified int
+	for i, p := range toProcess {
 		if dryRun {
+			newData, err := transformInfoJSON(p.data)
+			if err != nil {
+				failed++
+				log.Printf("ERROR transforming %q: %v", p.key, err)
+				continue
+			}
 			log.Printf("[DRY RUN] would write modified %q (%d bytes -> %d bytes)", p.key, len(p.data), len(newData))
 			continue
 		}
-
-		if err := uploadObject(ctx, client, cfg.Bucket, p.key, newData); err != nil {
+		if err := uploadErrs[i]; err != nil {
 			failed++
-			log.Printf("ERROR uploading %q: %v", p.key, err)
+			log.Printf("ERROR %v", err)
 			continue
 		}
-
 		modified++
 		log.Printf("modified %q", p.key)
 	}
@@ -600,49 +697,65 @@ func runTransform(ctx context.Context, client *s3.Client, cfg *Config, infoKeys 
 // S3 "move" of the true original, rather than reconstructing one from
 // hardcoded field values) and then deletes backupKey.
 func runRollback(ctx context.Context, client *s3.Client, cfg *Config, infoKeys []string, dryRun bool) {
-	var rolledBack, failed int
+	type rollbackResult struct {
+		err        error
+		dryRunNote string
+		restored   bool
+	}
+	results := make([]rollbackResult, len(infoKeys))
 
-	for _, infoKey := range infoKeys {
+	runConcurrent(len(infoKeys), cfg.Concurrency, func(i int) {
+		infoKey := infoKeys[i]
 		backupKey := backupKeyFor(infoKey, cfg.InfoFileName, cfg.BackupFileName)
 
 		backupData, err := downloadObject(ctx, client, cfg.Bucket, backupKey)
 		if err != nil {
-			failed++
-			log.Printf("ERROR downloading backup %q: %v", backupKey, err)
-			continue
+			results[i] = rollbackResult{err: fmt.Errorf("downloading backup %q: %w", backupKey, err)}
+			return
 		}
 
 		valid, err := isPreTransformShape(backupData)
 		if err != nil {
-			failed++
-			log.Printf("ERROR checking backup %q: %v", backupKey, err)
-			continue
+			results[i] = rollbackResult{err: fmt.Errorf("checking backup %q: %w", backupKey, err)}
+			return
 		}
 		if !valid {
-			failed++
-			log.Printf("ERROR backup %q does not look like a pre-transform info.json, refusing to restore it over %q", backupKey, infoKey)
-			continue
+			results[i] = rollbackResult{err: fmt.Errorf("backup %q does not look like a pre-transform info.json, refusing to restore it over %q", backupKey, infoKey)}
+			return
 		}
 
 		if dryRun {
-			log.Printf("[DRY RUN] would restore %q from backup %q, then remove the backup", infoKey, backupKey)
-			continue
+			results[i] = rollbackResult{dryRunNote: fmt.Sprintf("[DRY RUN] would restore %q from backup %q, then remove the backup", infoKey, backupKey)}
+			return
 		}
 
 		if err := copyObject(ctx, client, cfg.Bucket, backupKey, infoKey); err != nil {
-			failed++
-			log.Printf("ERROR restoring %q from backup %q: %v", infoKey, backupKey, err)
-			continue
+			results[i] = rollbackResult{err: fmt.Errorf("restoring %q from backup %q: %w", infoKey, backupKey, err)}
+			return
 		}
 
 		if err := deleteObject(ctx, client, cfg.Bucket, backupKey); err != nil {
-			failed++
-			log.Printf("ERROR removing backup %q: %v", backupKey, err)
-			continue
+			results[i] = rollbackResult{err: fmt.Errorf("removing backup %q: %w", backupKey, err)}
+			return
 		}
 
-		rolledBack++
-		log.Printf("restored %q from backup, removed backup %q", infoKey, backupKey)
+		results[i] = rollbackResult{restored: true}
+	})
+
+	var rolledBack, failed int
+	for i, r := range results {
+		infoKey := infoKeys[i]
+		backupKey := backupKeyFor(infoKey, cfg.InfoFileName, cfg.BackupFileName)
+		switch {
+		case r.err != nil:
+			failed++
+			log.Printf("ERROR %v", r.err)
+		case r.dryRunNote != "":
+			log.Print(r.dryRunNote)
+		case r.restored:
+			rolledBack++
+			log.Printf("restored %q from backup, removed backup %q", infoKey, backupKey)
+		}
 	}
 
 	if dryRun {

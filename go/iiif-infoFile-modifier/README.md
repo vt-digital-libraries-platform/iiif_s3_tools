@@ -163,7 +163,20 @@ with comments.
 | `tiles_dir_name` | no | `tiles` | Directory directly under the collection root (`collection_prefix`/`collection_identifier`) holding one subdirectory per archive's tiles. |
 | `info_file_name` | no | `info.json` | Filename to look for inside each archive's tile directory. |
 | `backup_file_name` | no | `backup_info.json` | Filename for the pre-modification backup, written alongside each `info.json`. |
+| `concurrency` | no | `10` | How many S3/DynamoDB requests run in parallel — both per-archive object listing, and per-key download/backup/transform/upload (or rollback). |
 | `dry_run` | no | `false` | If true, scan and log planned actions but write nothing to S3. |
+
+### Concurrency
+
+Per-key work (downloading, backing up, transforming, uploading, or rolling
+back an `info.json`) is independent across keys, so it runs concurrently, up
+to `concurrency` requests in flight at once (default 10). Discovery's
+per-archive S3 listing (`findInfoObjects`) is parallelized the same way.
+DynamoDB discovery itself (`findCollectionID`, `findArchiveIdentifiers`) is
+inherently sequential per table — each Scan page must be fetched after the
+last — so it isn't affected by this setting. Raise `concurrency` for a large
+collection on a fast connection, or lower it if you're hitting request
+throttling.
 
 ## Usage
 
